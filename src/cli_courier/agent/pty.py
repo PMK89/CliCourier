@@ -1,0 +1,103 @@
+from __future__ import annotations
+
+import asyncio
+import os
+from pathlib import Path
+from typing import Iterable
+
+import pexpect
+
+
+DEFAULT_AGENT_ENV_KEYS = (
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "SHELL",
+    "TERM",
+    "TZ",
+    "USER",
+)
+
+
+def build_agent_env(allowlist: Iterable[str] = ()) -> dict[str, str]:
+    allowed = set(DEFAULT_AGENT_ENV_KEYS) | set(allowlist)
+    env = {key: value for key, value in os.environ.items() if key in allowed}
+    env["TERM"] = env.get("TERM", "xterm-256color")
+    return env
+
+
+class PtyAgentProcess:
+    """Small async wrapper around a configured PTY child process."""
+
+    def __init__(
+        self,
+        command: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        dimensions: tuple[int, int] = (40, 120),
+    ) -> None:
+        if not command:
+            raise ValueError("command must not be empty")
+        self.command = command
+        self.cwd = cwd
+        self.env = env
+        self.dimensions = dimensions
+        self.output_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._child: pexpect.spawn | None = None
+        self._reader_task: asyncio.Task[None] | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._child is not None and self._child.isalive()
+
+    async def start(self) -> None:
+        if self.is_running:
+            return
+        rows, cols = self.dimensions
+        self._child = pexpect.spawn(
+            self.command[0],
+            self.command[1:],
+            cwd=str(self.cwd),
+            env=self.env,
+            dimensions=(rows, cols),
+            encoding="utf-8",
+            codec_errors="replace",
+            echo=False,
+        )
+        self._reader_task = asyncio.create_task(self._read_loop())
+
+    async def stop(self) -> None:
+        child = self._child
+        if child is None:
+            return
+        if child.isalive():
+            await asyncio.to_thread(child.terminate, True)
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+        self._child = None
+        self._reader_task = None
+
+    async def send_line(self, text: str) -> None:
+        if not self.is_running or self._child is None:
+            raise RuntimeError("agent process is not running")
+        await asyncio.to_thread(self._child.sendline, text)
+
+    async def _read_loop(self) -> None:
+        assert self._child is not None
+        child = self._child
+        while child.isalive():
+            try:
+                output = await asyncio.to_thread(child.read_nonblocking, 4096, 0.2)
+            except pexpect.TIMEOUT:
+                continue
+            except pexpect.EOF:
+                break
+            if output:
+                await self.output_queue.put(output)
+

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cli-courier"
+version = "0.1.0"
+description = "Local-first Telegram bridge for controlling trusted CLI agent sessions."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "CliCourier contributors" }]
+dependencies = [
+  "pexpect>=4.9",
+  "pydantic-settings>=2.0",
+  "python-dotenv>=1.0",
+  "python-telegram-bot>=21.0",
+]
+
+[project.optional-dependencies]
+voice-openai = ["openai>=1.0"]
+test = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+clicourier = "cli_courier.cli:main"
+cli-courier = "cli_courier.cli:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -1,0 +1,575 @@
+from __future__ import annotations
+
+import asyncio
+import tempfile
+from pathlib import Path
+
+from cli_courier.agent.adapters import get_adapter, list_adapters
+from cli_courier.agent.approval import ApprovalDecision, detect_pending_approval
+from cli_courier.agent.chunking import chunk_text
+from cli_courier.agent.output_filter import prepare_agent_output
+from cli_courier.agent.session import AgentSession
+from cli_courier.config import AgentOutputMode, Settings, TranscriptionBackend
+from cli_courier.filesystem import Sandbox, SandboxViolation
+from cli_courier.screenshots import ScreenshotError, ScreenshotService
+from cli_courier.state import RuntimeState, pending_voice_from_transcript
+from cli_courier.telegram_bot.auth import TelegramIdentity, is_authorized, unauthorized_reply
+from cli_courier.telegram_bot.commands import COMMAND_HELP, ParsedCommand
+from cli_courier.telegram_bot.router import RouteKind, route_text
+from cli_courier.voice import (
+    DisabledTranscriber,
+    OpenAITranscriber,
+    Transcriber,
+    WhisperCppTranscriber,
+    transcribe_with_cleanup,
+)
+
+
+class TelegramBridgeBot:
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        state: RuntimeState,
+        sandbox: Sandbox,
+        screenshot_service: ScreenshotService,
+        transcriber: Transcriber,
+    ) -> None:
+        self.settings = settings
+        self.state = state
+        self.sandbox = sandbox
+        self.screenshot_service = screenshot_service
+        self.transcriber = transcriber
+        self._flush_tasks: set[asyncio.Task[None]] = set()
+        self._last_approval_signature: str | None = None
+
+    def build_application(self):
+        from telegram.ext import ApplicationBuilder, CallbackQueryHandler, MessageHandler, filters
+
+        builder = ApplicationBuilder().token(self.settings.telegram_bot_token.get_secret_value())
+        if self.settings.auto_start_agent:
+            builder = builder.post_init(self._post_init)
+        application = builder.build()
+        application.add_handler(CallbackQueryHandler(self.handle_callback))
+        application.add_handler(MessageHandler(filters.ALL, self.handle_update))
+        return application
+
+    async def _post_init(self, application) -> None:
+        if self.settings.default_telegram_chat_id is None:
+            return
+        try:
+            message = await self._start_agent_session(
+                chat_id=self.settings.default_telegram_chat_id,
+                application=application,
+            )
+        except Exception as exc:  # noqa: BLE001 - daemon log should capture startup failures
+            print(f"failed to auto-start agent: {exc}", flush=True)
+            return
+        if not self._notifications_muted():
+            await application.bot.send_message(
+                chat_id=self.settings.default_telegram_chat_id,
+                text=message,
+            )
+
+    async def handle_update(self, update, context) -> None:
+        identity = self._identity(update)
+        if not is_authorized(identity, self.settings):
+            reply = unauthorized_reply(self.settings)
+            if reply and update.effective_message is not None:
+                await update.effective_message.reply_text(reply)
+            return
+
+        message = update.effective_message
+        if message is None:
+            return
+        if message.voice is not None:
+            await self._handle_voice(message, context)
+            return
+        if message.text is None:
+            return
+
+        route = route_text(
+            message.text,
+            has_pending_approval=self.state.pending_approval is not None
+            and not self.state.pending_approval.is_expired(),
+        )
+        if route.kind == RouteKind.EMPTY:
+            return
+        if route.kind == RouteKind.COMMAND and route.command is not None:
+            await self._handle_command(route.command, message, context)
+        elif route.kind == RouteKind.APPROVAL and route.approval_decision is not None:
+            await self._handle_approval(route.approval_decision, message)
+        elif route.kind == RouteKind.BLOCKED_APPROVAL:
+            await message.reply_text("No approval is pending. Use /agent yes to send that text anyway.")
+        elif route.kind == RouteKind.AGENT_TEXT:
+            await self._send_to_agent(route.text, message)
+
+    async def handle_callback(self, update, context) -> None:
+        query = update.callback_query
+        if query is None:
+            return
+        identity = self._identity(update)
+        if not is_authorized(identity, self.settings):
+            await query.answer()
+            return
+        await query.answer()
+        data = query.data or ""
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            return
+        kind, action, nonce = parts
+        if kind == "approval":
+            pending = self.state.pending_approval
+            if pending is None or pending.nonce != nonce or pending.is_expired():
+                await query.edit_message_text("Approval request expired.")
+                self.state.clear_pending_approval()
+                return
+            decision: ApprovalDecision = "approve" if action == "approve" else "reject"
+            try:
+                await self._apply_approval(decision)
+            except RuntimeError as exc:
+                await query.edit_message_text(str(exc))
+                return
+            await query.edit_message_text(f"Sent {decision}.")
+        elif kind == "voice":
+            pending_voice = self.state.pending_voice
+            if pending_voice is None or pending_voice.nonce != nonce or pending_voice.is_expired():
+                await query.edit_message_text("Voice transcript expired.")
+                self.state.clear_pending_voice()
+                return
+            if action == "send":
+                try:
+                    await self._send_to_agent_text(pending_voice.transcript)
+                except RuntimeError as exc:
+                    await query.edit_message_text(str(exc))
+                    return
+                self.state.clear_pending_voice()
+                await query.edit_message_text("Transcript sent.")
+            else:
+                self.state.clear_pending_voice()
+                await query.edit_message_text("Transcript discarded.")
+
+    async def _handle_command(self, command: ParsedCommand, message, context) -> None:
+        handlers = {
+            "status": self._cmd_status,
+            "start_agent": self._cmd_start_agent,
+            "stop_agent": self._cmd_stop_agent,
+            "restart_agent": self._cmd_restart_agent,
+            "agent": self._cmd_agent,
+            "agents": self._cmd_agents,
+            "pwd": self._cmd_pwd,
+            "ls": self._cmd_ls,
+            "tree": self._cmd_tree,
+            "cd": self._cmd_cd,
+            "cat": self._cmd_cat,
+            "sendfile": self._cmd_sendfile,
+            "screenshot": self._cmd_screenshot,
+            "approve": self._cmd_approve,
+            "reject": self._cmd_reject,
+            "voice_approve": self._cmd_voice_approve,
+            "voice_reject": self._cmd_voice_reject,
+            "voice_edit": self._cmd_voice_edit,
+            "mute": self._cmd_mute,
+            "unmute": self._cmd_unmute,
+            "mute_status": self._cmd_mute_status,
+            "help": self._cmd_help,
+            "start": self._cmd_help,
+        }
+        handler = handlers.get(command.name)
+        if handler is None:
+            await message.reply_text("Unknown command. Use /help.")
+            return
+        await handler(command.args, message, context)
+
+    async def _cmd_status(self, args: str, message, context) -> None:
+        agent = self.state.active_agent
+        if agent is None:
+            agent_status = "agent: stopped"
+        else:
+            status = agent.status()
+            agent_status = (
+                f"agent: {'running' if status.running else 'stopped'}\n"
+                f"adapter: {status.adapter_name}\n"
+                f"command: {' '.join(status.command)}"
+            )
+        pending = "yes" if self.state.pending_approval else "no"
+        muted = "yes" if self._notifications_muted() else "no"
+        await message.reply_text(
+            f"{agent_status}\n"
+            f"workspace: {self.sandbox.display_path(self.state.cwd)}\n"
+            f"pending approval: {pending}\n"
+            f"output mode: {self.settings.agent_output_mode.value}\n"
+            f"muted: {muted}"
+        )
+
+    async def _cmd_start_agent(self, args: str, message, context) -> None:
+        if self.state.active_agent is not None and self.state.active_agent.is_running:
+            await message.reply_text("Agent is already running.")
+            return
+        try:
+            reply = await self._start_agent_session(
+                chat_id=message.chat_id,
+                application=context.application,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced to trusted operator
+            await message.reply_text(f"Failed to start agent: {exc}")
+            return
+        await message.reply_text(reply)
+
+    async def _start_agent_session(self, *, chat_id: int, application) -> str:
+        adapter = get_adapter(self.settings.default_agent_adapter)
+        command = adapter.build_command(self.settings.default_agent_command)
+        session = AgentSession(
+            adapter=adapter,
+            command=command,
+            cwd=self.settings.workspace_root,
+            recent_output_max_chars=self.settings.recent_output_max_chars,
+            env_allowlist=self.settings.agent_env_allowlist,
+        )
+        await session.start()
+        self.state.active_agent = session
+        self.state.agent_chat_id = chat_id
+        self._last_approval_signature = None
+        task = application.create_task(self._flush_agent_output(application.bot, chat_id, session))
+        self._flush_tasks.add(task)
+        task.add_done_callback(self._flush_tasks.discard)
+        return f"Agent started: {' '.join(command)}"
+
+    async def _cmd_stop_agent(self, args: str, message, context) -> None:
+        agent = self.state.active_agent
+        if agent is None:
+            await message.reply_text("Agent is not running.")
+            return
+        await agent.stop()
+        self.state.active_agent = None
+        self.state.clear_pending_approval()
+        await message.reply_text("Agent stopped.")
+
+    async def _cmd_restart_agent(self, args: str, message, context) -> None:
+        if self.state.active_agent is not None:
+            await self.state.active_agent.stop()
+            self.state.active_agent = None
+        await self._cmd_start_agent(args, message, context)
+
+    async def _cmd_agent(self, args: str, message, context) -> None:
+        if not args:
+            await message.reply_text("Usage: /agent <text>")
+            return
+        await self._send_to_agent(args, message)
+
+    async def _cmd_agents(self, args: str, message, context) -> None:
+        lines = [
+            f"{adapter_id}: {adapter.display_name}"
+            for adapter_id, adapter in sorted(list_adapters().items())
+        ]
+        await message.reply_text("\n".join(lines))
+
+    async def _cmd_pwd(self, args: str, message, context) -> None:
+        await message.reply_text(self.sandbox.display_path(self.state.cwd))
+
+    async def _cmd_ls(self, args: str, message, context) -> None:
+        try:
+            entries = self.sandbox.list_dir(args or ".", cwd=self.state.cwd)
+        except SandboxViolation as exc:
+            await message.reply_text(str(exc))
+            return
+        body = "\n".join(entry.display_name for entry in entries) or "(empty)"
+        await self._reply_chunks(message, body)
+
+    async def _cmd_tree(self, args: str, message, context) -> None:
+        try:
+            body = self.sandbox.tree(args or ".", cwd=self.state.cwd)
+        except SandboxViolation as exc:
+            await message.reply_text(str(exc))
+            return
+        await self._reply_chunks(message, body)
+
+    async def _cmd_cd(self, args: str, message, context) -> None:
+        if not args:
+            await message.reply_text("Usage: /cd <path>")
+            return
+        try:
+            path = self.sandbox.resolve(args, cwd=self.state.cwd)
+            if not path.is_dir():
+                raise SandboxViolation("path is not a directory")
+        except SandboxViolation as exc:
+            await message.reply_text(str(exc))
+            return
+        self.state.set_cwd(path)
+        await message.reply_text(self.sandbox.display_path(path))
+
+    async def _cmd_cat(self, args: str, message, context) -> None:
+        if not args:
+            await message.reply_text("Usage: /cat <path>")
+            return
+        try:
+            body = self.sandbox.cat_file(args, cwd=self.state.cwd)
+        except SandboxViolation as exc:
+            await message.reply_text(str(exc))
+            return
+        await self._reply_chunks(message, body or "(empty)")
+
+    async def _cmd_sendfile(self, args: str, message, context) -> None:
+        if not args:
+            await message.reply_text("Usage: /sendfile <path>")
+            return
+        try:
+            path = self.sandbox.validate_sendfile(args, cwd=self.state.cwd)
+        except SandboxViolation as exc:
+            await message.reply_text(str(exc))
+            return
+        with path.open("rb") as file_obj:
+            await message.reply_document(document=file_obj, filename=path.name)
+
+    async def _cmd_screenshot(self, args: str, message, context) -> None:
+        try:
+            artifact = self.screenshot_service.latest()
+        except ScreenshotError as exc:
+            await message.reply_text(str(exc))
+            return
+        with artifact.path.open("rb") as file_obj:
+            await message.reply_document(
+                document=file_obj,
+                filename=artifact.path.name,
+                caption="Latest screenshot",
+            )
+
+    async def _cmd_approve(self, args: str, message, context) -> None:
+        await self._handle_approval("approve", message)
+
+    async def _cmd_reject(self, args: str, message, context) -> None:
+        await self._handle_approval("reject", message)
+
+    async def _cmd_voice_approve(self, args: str, message, context) -> None:
+        pending = self.state.pending_voice
+        if pending is None or pending.is_expired():
+            self.state.clear_pending_voice()
+            await message.reply_text("No voice transcript is pending.")
+            return
+        try:
+            await self._send_to_agent_text(pending.transcript)
+        except RuntimeError as exc:
+            await message.reply_text(str(exc))
+            return
+        self.state.clear_pending_voice()
+        await message.reply_text("Transcript sent.")
+
+    async def _cmd_voice_reject(self, args: str, message, context) -> None:
+        self.state.clear_pending_voice()
+        await message.reply_text("Transcript discarded.")
+
+    async def _cmd_voice_edit(self, args: str, message, context) -> None:
+        if not args:
+            await message.reply_text("Usage: /voice_edit <text>")
+            return
+        self.state.pending_voice = pending_voice_from_transcript(args)
+        await message.reply_text("Transcript updated. Use /voice_approve to send it.")
+
+    async def _cmd_mute(self, args: str, message, context) -> None:
+        path = self.settings.notification_block_file.expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("muted\n", encoding="utf-8")
+        await message.reply_text(f"Muted proactive agent output via {path}.")
+
+    async def _cmd_unmute(self, args: str, message, context) -> None:
+        path = self.settings.notification_block_file.expanduser()
+        path.unlink(missing_ok=True)
+        await message.reply_text("Proactive agent output unmuted.")
+
+    async def _cmd_mute_status(self, args: str, message, context) -> None:
+        await message.reply_text("Muted." if self._notifications_muted() else "Not muted.")
+
+    async def _cmd_help(self, args: str, message, context) -> None:
+        await message.reply_text(COMMAND_HELP)
+
+    async def _handle_voice(self, message, context) -> None:
+        voice = message.voice
+        if voice.file_size and voice.file_size > self.settings.voice_max_bytes:
+            await message.reply_text("Voice message is too large.")
+            return
+        if isinstance(self.transcriber, DisabledTranscriber):
+            await message.reply_text("Voice transcription is disabled.")
+            return
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="cli-courier-voice-") as temp_dir:
+                temp_path = Path(temp_dir) / f"{voice.file_unique_id}.oga"
+                telegram_file = await context.bot.get_file(voice.file_id)
+                await telegram_file.download_to_drive(custom_path=temp_path)
+                if temp_path.stat().st_size > self.settings.voice_max_bytes:
+                    await message.reply_text("Voice message is too large.")
+                    return
+                transcript = await transcribe_with_cleanup(self.transcriber, temp_path)
+        except Exception as exc:  # noqa: BLE001 - surfaced to trusted operator
+            await message.reply_text(f"Voice transcription failed: {exc}")
+            return
+
+        self.state.pending_voice = pending_voice_from_transcript(transcript)
+        await self._send_voice_confirmation(message, transcript)
+
+    async def _send_voice_confirmation(self, message, transcript: str) -> None:
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        pending = self.state.pending_voice
+        assert pending is not None
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Send", callback_data=f"voice:send:{pending.nonce}"),
+                    InlineKeyboardButton("Reject", callback_data=f"voice:reject:{pending.nonce}"),
+                ]
+            ]
+        )
+        await message.reply_text(
+            f"Transcript:\n{transcript}\n\nUse /voice_edit <text> to change it.",
+            reply_markup=keyboard,
+        )
+
+    async def _send_to_agent(self, text: str, message) -> None:
+        try:
+            await self._send_to_agent_text(text)
+        except RuntimeError as exc:
+            await message.reply_text(str(exc))
+
+    async def _send_to_agent_text(self, text: str) -> None:
+        agent = self.state.active_agent
+        if agent is None or not agent.is_running:
+            raise RuntimeError("Agent is not running. Use /start_agent first.")
+        await agent.send_text(text)
+
+    async def _handle_approval(self, decision: ApprovalDecision, message) -> None:
+        pending = self.state.pending_approval
+        if pending is None or pending.is_expired():
+            self.state.clear_pending_approval()
+            await message.reply_text("No approval is pending.")
+            return
+        await self._apply_approval(decision)
+        await message.reply_text(f"Sent {decision}.")
+
+    async def _apply_approval(self, decision: ApprovalDecision) -> None:
+        agent = self.state.active_agent
+        pending = self.state.pending_approval
+        if agent is None or pending is None:
+            raise RuntimeError("No approval is pending.")
+        text = agent.adapter.approve_input if decision == "approve" else agent.adapter.reject_input
+        await agent.send_text(text)
+        self.state.clear_pending_approval()
+
+    async def _flush_agent_output(self, bot, chat_id: int, session: AgentSession) -> None:
+        pending_text = ""
+        first_output_at: float | None = None
+        last_output_at: float | None = None
+        interval = self.settings.output_flush_interval_ms / 1000
+        while self.state.active_agent is session and session.is_running:
+            try:
+                output = await asyncio.wait_for(session.output_queue.get(), timeout=interval)
+                pending_text += output
+                now = asyncio.get_running_loop().time()
+                first_output_at = first_output_at or now
+                last_output_at = now
+                await self._maybe_send_approval_prompt(bot, chat_id, session)
+            except asyncio.TimeoutError:
+                pass
+            if not pending_text:
+                continue
+            if self.settings.agent_output_mode == AgentOutputMode.STREAM:
+                if len(pending_text) < self.settings.max_telegram_chunk_chars and not session.output_queue.empty():
+                    continue
+                if not self._approval_pending():
+                    await self._send_agent_output(bot, chat_id, pending_text)
+                pending_text = ""
+                first_output_at = None
+                last_output_at = None
+                continue
+
+            loop_now = asyncio.get_running_loop().time()
+            idle_seconds = self.settings.final_output_idle_ms / 1000
+            max_wait_seconds = self.settings.final_output_max_wait_ms / 1000
+            idle = last_output_at is not None and loop_now - last_output_at >= idle_seconds
+            waited = first_output_at is not None and loop_now - first_output_at >= max_wait_seconds
+            if idle or waited:
+                if not self._approval_pending():
+                    final_text = prepare_agent_output(
+                        pending_text,
+                        suppress_trace_lines=self.settings.suppress_agent_trace_lines,
+                    )
+                    await self._send_agent_output(bot, chat_id, final_text)
+                pending_text = ""
+                first_output_at = None
+                last_output_at = None
+
+    async def _maybe_send_approval_prompt(self, bot, chat_id: int, session: AgentSession) -> None:
+        if self._notifications_muted():
+            return
+        current = self.state.pending_approval
+        if current is not None and not current.is_expired():
+            return
+        pending = detect_pending_approval(session.recent_output(4000), session.adapter)
+        if pending is None:
+            return
+        if pending.prompt_excerpt == self._last_approval_signature:
+            return
+        self._last_approval_signature = pending.prompt_excerpt
+        self.state.pending_approval = pending
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Approve", callback_data=f"approval:approve:{pending.nonce}"),
+                    InlineKeyboardButton("Reject", callback_data=f"approval:reject:{pending.nonce}"),
+                ]
+            ]
+        )
+        sent = await bot.send_message(
+            chat_id=chat_id,
+            text=f"Approval requested:\n{pending.prompt_excerpt}",
+            reply_markup=keyboard,
+        )
+        pending.message_id = sent.message_id
+
+    async def _send_agent_output(self, bot, chat_id: int, text: str) -> None:
+        if self._notifications_muted() or not text.strip():
+            return
+        for chunk in chunk_text(text, self.settings.max_telegram_chunk_chars):
+            await bot.send_message(chat_id=chat_id, text=chunk)
+
+    async def _reply_chunks(self, message, text: str) -> None:
+        for chunk in chunk_text(text, self.settings.max_telegram_chunk_chars):
+            await message.reply_text(chunk)
+
+    def _identity(self, update) -> TelegramIdentity:
+        user = update.effective_user
+        chat = update.effective_chat
+        return TelegramIdentity(
+            user_id=user.id if user is not None else None,
+            chat_id=chat.id if chat is not None else None,
+            chat_type=chat.type if chat is not None else None,
+        )
+
+    def _notifications_muted(self) -> bool:
+        return self.settings.notification_block_file.expanduser().exists()
+
+    def _approval_pending(self) -> bool:
+        pending = self.state.pending_approval
+        return pending is not None and not pending.is_expired()
+
+
+def build_transcriber(settings: Settings) -> Transcriber:
+    if settings.transcription_backend == TranscriptionBackend.OPENAI:
+        assert settings.transcription_openai_api_key is not None
+        return OpenAITranscriber(
+            api_key=settings.transcription_openai_api_key.get_secret_value(),
+            model=settings.openai_transcription_model,
+        )
+    if settings.transcription_backend == TranscriptionBackend.WHISPER_CPP:
+        assert settings.whisper_cpp_binary is not None
+        assert settings.whisper_cpp_model is not None
+        return WhisperCppTranscriber(
+            binary=settings.whisper_cpp_binary,
+            model=settings.whisper_cpp_model,
+            ffmpeg_binary=settings.whisper_cpp_ffmpeg_binary,
+            extra_args=settings.whisper_cpp_extra_args,
+            timeout_seconds=settings.whisper_cpp_timeout_seconds,
+        )
+    return DisabledTranscriber()
