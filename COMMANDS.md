@@ -58,8 +58,11 @@ to the agent without confirmation.
 
 | Command | Description |
 | --- | --- |
-| `clicourier setup` | Prompt for Telegram token, user id, workspace, CLI command, voice backend, and write local config. |
-| `clicourier setup-whisper` | Clone/build `whisper.cpp`, download a ggml model, and configure local transcription. |
+| `clicourier init` | Prompt for Telegram token, user id, workspace, CLI command, local Whisper defaults, and write local config. |
+| `clicourier doctor` | Check platform, config, Telegram settings, agent command, ffmpeg, faster-whisper, and model cache status. |
+| `clicourier config` | Print config path and a redacted non-secret summary. |
+| `clicourier model download` | Download/load the configured faster-whisper model. |
+| `clicourier model list` | Show configured model, backend, cache status, and known model names. |
 | `clicourier run -- <tool>` | Run the bridge in the foreground and auto-start the CLI tool. |
 | `clicourier start -- <tool>` | Run the bridge in the background and auto-start the CLI tool. |
 | `clicourier stop` | Stop the background bridge. |

@@ -2,6 +2,7 @@
 
 from .transcriber import (
     DisabledTranscriber,
+    FasterWhisperTranscriber,
     OpenAITranscriber,
     Transcriber,
     TranscriptionDisabled,
@@ -11,6 +12,7 @@ from .transcriber import (
 
 __all__ = [
     "DisabledTranscriber",
+    "FasterWhisperTranscriber",
     "OpenAITranscriber",
     "Transcriber",
     "TranscriptionDisabled",

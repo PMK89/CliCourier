@@ -52,9 +52,10 @@ in `AGENT_ENV_ALLOWLIST`.
 
 ### Local Voice Models
 
-`whisper.cpp` and ggml model files are local executables/data. Install them from sources you
-trust, keep them under your user account, and avoid running the bridge as root. Telegram
-voice files are deleted after transcription.
+`faster-whisper` model files are downloaded to the local model cache. Keep them under your
+user account and avoid running the bridge as root. Telegram voice files are converted in a
+temporary directory and deleted after transcription. The optional `whisper_cpp` backend uses
+local executables/data; install those only from sources you trust.
 
 ### Local Mute Toggle
 

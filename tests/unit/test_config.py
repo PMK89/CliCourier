@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from cli_courier.config import AgentOutputMode, Settings, TranscriptionBackend, load_settings
+from cli_courier.config import (
+    AgentOutputMode,
+    Settings,
+    TranscriptionBackend,
+    WhisperBackend,
+    load_settings,
+)
 from cli_courier.local_config import write_env_file
 
 
@@ -33,6 +39,10 @@ def test_settings_parse_required_values(tmp_path: Path) -> None:
     assert settings.agent_env_allowlist == ("EDITOR", "GIT_AUTHOR_NAME")
     assert settings.agent_output_mode == AgentOutputMode.FINAL
     assert settings.default_telegram_chat_id is None
+    assert settings.whisper_backend == WhisperBackend.LOCAL
+    assert settings.whisper_model == "small"
+    assert settings.whisper_compute_type == "int8"
+    assert settings.whisper_device == "cpu"
 
 
 def test_settings_requires_existing_workspace(tmp_path: Path) -> None:
@@ -43,6 +53,9 @@ def test_settings_requires_existing_workspace(tmp_path: Path) -> None:
 def test_openai_transcription_requires_api_key(tmp_path: Path) -> None:
     with pytest.raises(ValidationError):
         make_settings(tmp_path, TRANSCRIPTION_BACKEND=TranscriptionBackend.OPENAI)
+
+    with pytest.raises(ValidationError):
+        make_settings(tmp_path, WHISPER_BACKEND=WhisperBackend.OPENAI)
 
 
 def test_screenshot_dir_must_stay_in_workspace_by_default(tmp_path: Path) -> None:
@@ -94,6 +107,8 @@ def test_load_settings_reads_local_config_file(tmp_path: Path) -> None:
             "DEFAULT_AGENT_COMMAND": "gemini",
             "DEFAULT_AGENT_ADAPTER": "generic",
             "DEFAULT_TELEGRAM_CHAT_ID": "",
+            "WHISPER_BACKEND": "local",
+            "WHISPER_MODEL": "base",
         },
     )
 
@@ -101,3 +116,4 @@ def test_load_settings_reads_local_config_file(tmp_path: Path) -> None:
 
     assert settings.allowed_telegram_user_ids == (42,)
     assert settings.default_agent_command == "gemini"
+    assert settings.whisper_model == "base"

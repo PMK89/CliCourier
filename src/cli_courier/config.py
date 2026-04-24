@@ -22,6 +22,13 @@ class TranscriptionBackend(str, Enum):
     WHISPER_CPP = "whisper_cpp"
 
 
+class WhisperBackend(str, Enum):
+    NONE = "none"
+    LOCAL = "local"
+    OPENAI = "openai"
+    WHISPER_CPP = "whisper_cpp"
+
+
 class UnauthorizedReplyMode(str, Enum):
     IGNORE = "ignore"
     GENERIC = "generic"
@@ -72,6 +79,12 @@ class Settings(BaseSettings):
         default="gpt-4o-mini-transcribe",
         alias="OPENAI_TRANSCRIPTION_MODEL",
     )
+    whisper_backend: WhisperBackend = Field(default=WhisperBackend.LOCAL, alias="WHISPER_BACKEND")
+    whisper_model: str = Field(default="small", alias="WHISPER_MODEL")
+    whisper_compute_type: str = Field(default="int8", alias="WHISPER_COMPUTE_TYPE")
+    whisper_device: str = Field(default="cpu", alias="WHISPER_DEVICE")
+    whisper_model_dir: Path | None = Field(default=None, alias="WHISPER_MODEL_DIR")
+    ffmpeg_binary: str = Field(default="ffmpeg", alias="FFMPEG_BINARY")
     whisper_cpp_binary: Path | None = Field(default=None, alias="WHISPER_CPP_BINARY")
     whisper_cpp_model: Path | None = Field(default=None, alias="WHISPER_CPP_MODEL")
     whisper_cpp_ffmpeg_binary: str = Field(default="ffmpeg", alias="WHISPER_CPP_FFMPEG_BINARY")
@@ -158,7 +171,7 @@ class Settings(BaseSettings):
             return None
         return Path(value).expanduser().resolve()
 
-    @field_validator("whisper_cpp_binary", "whisper_cpp_model", mode="before")
+    @field_validator("whisper_cpp_binary", "whisper_cpp_model", "whisper_model_dir", mode="before")
     @classmethod
     def normalize_optional_path(cls, value: Any) -> Path | None:
         if value is None or str(value).strip() == "":
@@ -204,7 +217,10 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_cross_field_rules(self) -> "Settings":
         if (
-            self.transcription_backend == TranscriptionBackend.OPENAI
+            (
+                self.transcription_backend == TranscriptionBackend.OPENAI
+                or self.whisper_backend == WhisperBackend.OPENAI
+            )
             and (
                 self.transcription_openai_api_key is None
                 or not self.transcription_openai_api_key.get_secret_value().strip()
@@ -218,6 +234,15 @@ class Settings(BaseSettings):
                 raise ConfigError("WHISPER_CPP_BINARY is required when TRANSCRIPTION_BACKEND=whisper_cpp")
             if self.whisper_cpp_model is None:
                 raise ConfigError("WHISPER_CPP_MODEL is required when TRANSCRIPTION_BACKEND=whisper_cpp")
+            if not self.whisper_cpp_binary.exists():
+                raise ConfigError(f"WHISPER_CPP_BINARY does not exist: {self.whisper_cpp_binary}")
+            if not self.whisper_cpp_model.exists():
+                raise ConfigError(f"WHISPER_CPP_MODEL does not exist: {self.whisper_cpp_model}")
+        if self.whisper_backend == WhisperBackend.WHISPER_CPP:
+            if self.whisper_cpp_binary is None:
+                raise ConfigError("WHISPER_CPP_BINARY is required when WHISPER_BACKEND=whisper_cpp")
+            if self.whisper_cpp_model is None:
+                raise ConfigError("WHISPER_CPP_MODEL is required when WHISPER_BACKEND=whisper_cpp")
             if not self.whisper_cpp_binary.exists():
                 raise ConfigError(f"WHISPER_CPP_BINARY does not exist: {self.whisper_cpp_binary}")
             if not self.whisper_cpp_model.exists():

@@ -19,7 +19,7 @@ workstation where Telegram is the remote control surface, not the security bound
 - Workspace sandbox for `/ls`, `/tree`, `/cd`, `/cat`, and `/sendfile`.
 - Sensitive file blocking for env files, private keys, cloud credentials, and token-like names.
 - Newest screenshot artifact retrieval from a configured directory.
-- Local `whisper.cpp` voice transcription with transcript confirmation before sending.
+- Local CPU-only `faster-whisper` voice transcription with transcript confirmation before sending.
 - Optional OpenAI voice transcription for users who prefer an API backend.
 - Background daemon controls through the `clicourier` command.
 - A mute/block file so proactive Telegram output can be paused when you are at the computer.
@@ -33,10 +33,30 @@ workstation where Telegram is the remote control surface, not the security bound
 
 ## Installation
 
+One-command install for Linux or WSL:
+
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e ".[test]"
+curl -LsSf https://raw.githubusercontent.com/PMK89/CliCourier/main/install.sh | sh
+```
+
+The installer uses `uv tool` and creates `~/.config/clicourier` if needed.
+
+Manual install with uv:
+
+```bash
+uv tool install git+https://github.com/PMK89/CliCourier.git
+```
+
+Manual install with pipx:
+
+```bash
+pipx install git+https://github.com/PMK89/CliCourier.git
+```
+
+From a checkout:
+
+```bash
+uv tool install --force .
 ```
 
 ## Configuration
@@ -53,7 +73,7 @@ DEFAULT_AGENT_COMMAND=codex
 Or run the interactive setup:
 
 ```bash
-clicourier setup
+clicourier init
 ```
 
 This writes `~/.config/clicourier/config.env` and can install a `~/.local/bin/clicourier`
@@ -67,9 +87,12 @@ AUTO_START_AGENT=true
 DEFAULT_TELEGRAM_CHAT_ID=123456789
 AGENT_ENV_ALLOWLIST=OPENAI_API_KEY
 SCREENSHOT_DIR=/absolute/path/to/workspace/screenshots
-TRANSCRIPTION_BACKEND=whisper_cpp
-WHISPER_CPP_BINARY=/home/you/.local/share/clicourier/whisper.cpp/main
-WHISPER_CPP_MODEL=/home/you/.local/share/clicourier/whisper.cpp/models/ggml-turbo.bin
+WHISPER_BACKEND=local
+WHISPER_MODEL=small
+WHISPER_COMPUTE_TYPE=int8
+WHISPER_DEVICE=cpu
+WHISPER_MODEL_DIR=
+FFMPEG_BINARY=ffmpeg
 AGENT_OUTPUT_MODE=final
 NOTIFICATION_BLOCK_FILE=/home/you/.local/state/clicourier/muted
 MAX_TELEGRAM_CHUNK_CHARS=3500
@@ -85,24 +108,16 @@ unauthorized users are ignored.
 ## Local Whisper
 
 ```bash
-clicourier setup-whisper
+clicourier model download
+clicourier model list
 ```
 
-The helper clones `whisper.cpp`, builds it with `make`, downloads the selected ggml model
-(`turbo` by default), and appends the local backend paths to your config. Telegram voice
-messages are still confirmed before being sent to the agent.
+Voice transcription defaults to local `faster-whisper`, CPU device, and `int8` compute.
+The default model is `small`, configurable with `WHISPER_MODEL`. Models are downloaded
+lazily on first use or explicitly through `clicourier model download`.
 
-Manual equivalent:
-
-```bash
-git clone https://github.com/ggerganov/whisper.cpp.git ~/.local/share/clicourier/whisper.cpp
-cd ~/.local/share/clicourier/whisper.cpp
-make
-bash ./models/download-ggml-model.sh turbo
-```
-
-Set `TRANSCRIPTION_BACKEND=whisper_cpp`, `WHISPER_CPP_BINARY`, and `WHISPER_CPP_MODEL`
-to use the local model.
+Telegram voice messages are OGG/Opus. CliCourier converts them to 16 kHz mono WAV with
+`ffmpeg` before transcription, so `ffmpeg` must be installed and available on PATH.
 
 ## Run
 
@@ -143,12 +158,31 @@ The same toggle is available from Telegram with `/mute`, `/unmute`, and `/mute_s
 ## Development
 
 ```bash
-python -m pytest
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m cli_courier.cli status
+uv sync
+uv run clicourier run
+uv run pytest
 ```
 
 The integration test uses `tests/fixtures/fake_agent.py` so PTY behavior can be tested
 without Codex, Claude, Gemini, or a Telegram bot token.
+
+## WSL
+
+Windows support means WSL for the MVP. Install and run CliCourier inside a Linux
+distribution, use Linux paths such as `/home/you/project`, and run Linux CLI tools from
+inside WSL. Native Windows terminals and PowerShell are not supported yet.
+
+## Docker
+
+Docker is not the recommended path because CliCourier is meant to control host coding
+agents and local workspaces. Local uv or pipx installation is the default. A Docker setup
+can be added later for isolated experiments, but it is not included in this MVP.
+
+## Security
+
+CliCourier controls a real local CLI process from Telegram. Keep the Telegram allowlist
+narrow, do not run as root, keep `WORKSPACE_ROOT` scoped to the project you want to expose,
+and leave sensitive file sending disabled by default.
 
 ## Documentation
 

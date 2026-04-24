@@ -9,7 +9,7 @@
 - Conservative approval detection with explicit approve/reject flow.
 - Workspace sandbox commands for listing, reading, and sending files.
 - Newest screenshot artifact retrieval.
-- Local whisper.cpp transcription with transcript confirmation.
+- Local faster-whisper transcription with transcript confirmation.
 - Background daemon controls via `clicourier`.
 - Final-output delivery mode with trace-line suppression.
 - Local mute block file for pausing proactive Telegram output.
@@ -19,7 +19,7 @@
 
 - Multiple named sessions with persisted state.
 - Claude Code and Gemini CLI adapters.
-- faster-whisper transcription backend.
+- Optional Docker files for isolated experiments.
 - Tool-specific final-answer extractors for Claude Code and Gemini CLI.
 - Configured screenshot command backend with strict setup-time configuration.
 - Optional encrypted state and log persistence.

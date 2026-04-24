@@ -22,13 +22,15 @@ src/cli_courier/
   cli.py                 clicourier command dispatcher
   config.py              pydantic-settings config model
   daemon.py              PID/log helpers for background mode
-  setup.py               interactive setup and whisper.cpp bootstrap helpers
+  setup.py               interactive config initialization helpers
+  model_manager.py       faster-whisper model listing and download helpers
+  doctor.py              local dependency and config diagnostics
   state.py               one-session runtime state
   telegram_bot/          auth, command parsing, routing, Telegram runtime
   agent/                 adapters, PTY process, sessions, approval detection
   filesystem/            workspace sandbox and safe file operations
   screenshots/           newest screenshot artifact lookup
-  voice/                 transcriber protocol, whisper.cpp, and OpenAI backends
+  voice/                 transcriber protocol, faster-whisper, whisper.cpp, and OpenAI backends
   security/              terminal output sanitization
 ```
 
@@ -94,9 +96,12 @@ output and approval prompts are not sent to Telegram; command replies still work
 
 ## Voice Model
 
-Voice is disabled unless a transcription backend is configured. `whisper_cpp` runs a local
-`whisper.cpp` binary and ggml model, converting Telegram voice audio to 16 kHz mono WAV via
-`ffmpeg` before inference. `openai` remains available as an optional API backend.
+Voice defaults to `WHISPER_BACKEND=local`, implemented with `faster-whisper` on CPU with
+`WHISPER_COMPUTE_TYPE=int8`. Telegram OGG/Opus voice audio is converted to 16 kHz mono WAV
+with `ffmpeg` before inference. Models download lazily through faster-whisper or explicitly
+through `clicourier model download`.
+
+`openai` and `whisper_cpp` remain backend options for future or advanced use.
 
 Voice files are downloaded to a private temp path, size-checked, transcribed, and deleted.
 The transcript is stored as pending state and is only sent to the agent after

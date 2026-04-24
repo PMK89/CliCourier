@@ -11,6 +11,7 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "CliCourier contributors" }]
 dependencies = [
+  "faster-whisper>=1.0",
   "pexpect>=4.9",
   "pydantic-settings>=2.0",
   "python-dotenv>=1.0",
@@ -25,12 +26,21 @@ test = [
 ]
 
 [project.scripts]
-clicourier = "cli_courier.cli:main"
-cli-courier = "cli_courier.cli:main"
+clicourier = "clicourier.cli:app"
+cli-courier = "clicourier.cli:app"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cli_courier", "src/clicourier"]
 
 [tool.ruff]
 line-length = 100

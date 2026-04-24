@@ -55,8 +55,24 @@ def infer_adapter(command: str) -> str:
     return "generic"
 
 
-def run_setup(config_path: Path = default_config_path()) -> Path:
-    print("CliCourier setup")
+def init_config(
+    config_path: Path = default_config_path(),
+    *,
+    force: bool = False,
+    interactive: bool = True,
+    install_launcher: bool = False,
+) -> Path:
+    config_path = config_path.expanduser()
+    if config_path.exists() and not force:
+        if not interactive or not yes_no(f"{config_path} exists. Overwrite it", default=False):
+            raise FileExistsError(f"config already exists: {config_path}")
+
+    if not interactive:
+        values = default_config_values()
+        write_env_file(config_path, values)
+        return config_path
+
+    print("CliCourier init")
     print(f"Config file: {config_path.expanduser()}")
     token = prompt("Telegram bot token", secret=True)
     user_ids = prompt("Allowed Telegram user id(s), comma-separated")
@@ -67,7 +83,7 @@ def run_setup(config_path: Path = default_config_path()) -> Path:
     auto_start = "true" if yes_no("Start the CLI tool automatically when the daemon starts") else "false"
     mute_file = prompt("Mute/block file", default=str(default_mute_file()))
 
-    backend = prompt("Voice transcription backend (none/whisper_cpp/openai)", default="whisper_cpp")
+    backend = prompt("Whisper backend (local/none/openai/whisper_cpp)", default="local")
     values = {
         "TELEGRAM_BOT_TOKEN": token,
         "ALLOWED_TELEGRAM_USER_IDS": user_ids,
@@ -79,7 +95,12 @@ def run_setup(config_path: Path = default_config_path()) -> Path:
         "AGENT_OUTPUT_MODE": "final",
         "SUPPRESS_AGENT_TRACE_LINES": "true",
         "NOTIFICATION_BLOCK_FILE": str(Path(mute_file).expanduser()),
-        "TRANSCRIPTION_BACKEND": backend,
+        "WHISPER_BACKEND": backend,
+        "WHISPER_MODEL": prompt("Local Whisper model", default="small"),
+        "WHISPER_COMPUTE_TYPE": "int8",
+        "WHISPER_DEVICE": "cpu",
+        "WHISPER_MODEL_DIR": "",
+        "FFMPEG_BINARY": "ffmpeg",
     }
 
     if backend == "whisper_cpp":
@@ -102,16 +123,41 @@ def run_setup(config_path: Path = default_config_path()) -> Path:
             default="gpt-4o-mini-transcribe",
         )
 
-    write_env_file(config_path.expanduser(), values)
+    write_env_file(config_path, values)
     if backend == "whisper_cpp":
         binary = Path(values["WHISPER_CPP_BINARY"]).expanduser()
         model = Path(values["WHISPER_CPP_MODEL"]).expanduser()
         if not binary.exists() or not model.exists():
             print("Local Whisper paths do not exist yet. Run `clicourier setup-whisper` next.")
-    if yes_no("Install/update ~/.local/bin/clicourier launcher", default=True):
-        install_user_launcher(config_path.expanduser())
-    print(f"Wrote {config_path.expanduser()}")
-    return config_path.expanduser()
+    if install_launcher or yes_no("Install/update ~/.local/bin/clicourier launcher", default=False):
+        install_user_launcher(config_path)
+    print(f"Wrote {config_path}")
+    return config_path
+
+
+def run_setup(config_path: Path = default_config_path()) -> Path:
+    return init_config(config_path, force=False, interactive=True)
+
+
+def default_config_values() -> dict[str, str]:
+    return {
+        "TELEGRAM_BOT_TOKEN": "replace-me",
+        "ALLOWED_TELEGRAM_USER_IDS": "123456789",
+        "DEFAULT_TELEGRAM_CHAT_ID": "",
+        "WORKSPACE_ROOT": str(Path.cwd().resolve()),
+        "DEFAULT_AGENT_COMMAND": "codex",
+        "DEFAULT_AGENT_ADAPTER": "codex",
+        "AUTO_START_AGENT": "false",
+        "AGENT_OUTPUT_MODE": "final",
+        "SUPPRESS_AGENT_TRACE_LINES": "true",
+        "NOTIFICATION_BLOCK_FILE": str(default_mute_file()),
+        "WHISPER_BACKEND": "local",
+        "WHISPER_MODEL": "small",
+        "WHISPER_COMPUTE_TYPE": "int8",
+        "WHISPER_DEVICE": "cpu",
+        "WHISPER_MODEL_DIR": "",
+        "FFMPEG_BINARY": "ffmpeg",
+    }
 
 
 def install_user_launcher(config_path: Path) -> Path:
@@ -157,7 +203,7 @@ def setup_whisper_cpp(config_path: Path = default_config_path()) -> Path:
     ensure_private_parent(config_path)
     with config_path.expanduser().open("a", encoding="utf-8") as file_obj:
         file_obj.write("\n")
-        file_obj.write('TRANSCRIPTION_BACKEND="whisper_cpp"\n')
+        file_obj.write('WHISPER_BACKEND="whisper_cpp"\n')
         file_obj.write(f'WHISPER_CPP_BINARY="{binary}"\n')
         file_obj.write(f'WHISPER_CPP_MODEL="{model}"\n')
         file_obj.write('WHISPER_CPP_FFMPEG_BINARY="ffmpeg"\n')

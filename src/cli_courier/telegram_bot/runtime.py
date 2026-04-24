@@ -9,7 +9,7 @@ from cli_courier.agent.approval import ApprovalDecision, detect_pending_approval
 from cli_courier.agent.chunking import chunk_text
 from cli_courier.agent.output_filter import prepare_agent_output
 from cli_courier.agent.session import AgentSession
-from cli_courier.config import AgentOutputMode, Settings, TranscriptionBackend
+from cli_courier.config import AgentOutputMode, Settings, TranscriptionBackend, WhisperBackend
 from cli_courier.filesystem import Sandbox, SandboxViolation
 from cli_courier.screenshots import ScreenshotError, ScreenshotService
 from cli_courier.state import RuntimeState, pending_voice_from_transcript
@@ -18,6 +18,7 @@ from cli_courier.telegram_bot.commands import COMMAND_HELP, ParsedCommand
 from cli_courier.telegram_bot.router import RouteKind, route_text
 from cli_courier.voice import (
     DisabledTranscriber,
+    FasterWhisperTranscriber,
     OpenAITranscriber,
     Transcriber,
     WhisperCppTranscriber,
@@ -556,13 +557,29 @@ class TelegramBridgeBot:
 
 
 def build_transcriber(settings: Settings) -> Transcriber:
-    if settings.transcription_backend == TranscriptionBackend.OPENAI:
+    if settings.whisper_backend == WhisperBackend.NONE:
+        return DisabledTranscriber()
+    if settings.whisper_backend == WhisperBackend.LOCAL:
+        return FasterWhisperTranscriber(
+            model=settings.whisper_model,
+            device=settings.whisper_device,
+            compute_type=settings.whisper_compute_type,
+            model_dir=settings.whisper_model_dir,
+            ffmpeg_binary=settings.ffmpeg_binary,
+        )
+    if (
+        settings.whisper_backend == WhisperBackend.OPENAI
+        or settings.transcription_backend == TranscriptionBackend.OPENAI
+    ):
         assert settings.transcription_openai_api_key is not None
         return OpenAITranscriber(
             api_key=settings.transcription_openai_api_key.get_secret_value(),
             model=settings.openai_transcription_model,
         )
-    if settings.transcription_backend == TranscriptionBackend.WHISPER_CPP:
+    if (
+        settings.whisper_backend == WhisperBackend.WHISPER_CPP
+        or settings.transcription_backend == TranscriptionBackend.WHISPER_CPP
+    ):
         assert settings.whisper_cpp_binary is not None
         assert settings.whisper_cpp_model is not None
         return WhisperCppTranscriber(

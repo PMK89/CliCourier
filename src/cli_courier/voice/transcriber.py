@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -41,6 +42,61 @@ class OpenAITranscriber:
         if isinstance(text, str):
             return text.strip()
         return str(response).strip()
+
+
+class FasterWhisperTranscriber:
+    def __init__(
+        self,
+        *,
+        model: str = "small",
+        device: str = "cpu",
+        compute_type: str = "int8",
+        model_dir: Path | None = None,
+        ffmpeg_binary: str = "ffmpeg",
+    ) -> None:
+        self.model = model
+        self.device = device
+        self.compute_type = compute_type
+        self.model_dir = model_dir
+        self.ffmpeg_binary = ffmpeg_binary
+
+    async def transcribe(self, path: Path) -> str:
+        return await asyncio.to_thread(self._transcribe_sync, path)
+
+    def _transcribe_sync(self, path: Path) -> str:
+        with tempfile.TemporaryDirectory(prefix="cli-courier-faster-whisper-") as temp_dir:
+            wav_path = Path(temp_dir) / "audio.wav"
+            convert_audio_to_wav(
+                source=path,
+                target=wav_path,
+                ffmpeg_binary=self.ffmpeg_binary,
+            )
+            try:
+                from faster_whisper import WhisperModel
+            except ImportError as exc:
+                raise RuntimeError(
+                    "faster-whisper is not installed. Reinstall CliCourier with uv or pipx."
+                ) from exc
+
+            kwargs: dict[str, str] = {
+                "device": self.device,
+                "compute_type": self.compute_type,
+            }
+            if self.model_dir is not None:
+                self.model_dir.mkdir(parents=True, exist_ok=True)
+                kwargs["download_root"] = str(self.model_dir)
+            try:
+                model = WhisperModel(self.model, **kwargs)
+                segments, _info = model.transcribe(str(wav_path))
+                transcript = " ".join(segment.text.strip() for segment in segments).strip()
+            except Exception as exc:  # noqa: BLE001 - convert backend errors into operator action
+                raise RuntimeError(
+                    "local Whisper transcription failed. Check ffmpeg, faster-whisper, and "
+                    f"model '{self.model}' on {self.device}/{self.compute_type}."
+                ) from exc
+            if not transcript:
+                raise RuntimeError("local Whisper returned an empty transcript")
+            return transcript
 
 
 class WhisperCppTranscriber:
@@ -93,29 +149,52 @@ class WhisperCppTranscriber:
             return transcript
 
     def _convert_to_wav(self, source: Path, target: Path) -> None:
-        command = [
-            self.ffmpeg_binary,
-            "-y",
-            "-i",
-            str(source),
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            "-c:a",
-            "pcm_s16le",
-            str(target),
-        ]
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=self.timeout_seconds,
+        convert_audio_to_wav(
+            source=source,
+            target=target,
+            ffmpeg_binary=self.ffmpeg_binary,
+            timeout_seconds=self.timeout_seconds,
         )
-        if completed.returncode != 0:
-            error = completed.stderr.strip() or completed.stdout.strip()
-            raise RuntimeError(f"ffmpeg failed before whisper.cpp transcription: {error}")
+
+
+def convert_audio_to_wav(
+    *,
+    source: Path,
+    target: Path,
+    ffmpeg_binary: str = "ffmpeg",
+    timeout_seconds: int = 120,
+) -> None:
+    if shutil.which(ffmpeg_binary) is None and not Path(ffmpeg_binary).exists():
+        raise RuntimeError(
+            "ffmpeg is required to decode Telegram voice messages (OGG/Opus). "
+            "Install ffmpeg and make sure it is on PATH."
+        )
+    command = [
+        ffmpeg_binary,
+        "-y",
+        "-i",
+        str(source),
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-c:a",
+        "pcm_s16le",
+        str(target),
+    ]
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+    )
+    if completed.returncode != 0:
+        error = completed.stderr.strip() or completed.stdout.strip()
+        raise RuntimeError(
+            "ffmpeg could not decode the Telegram voice message. Install ffmpeg with OGG/Opus "
+            f"support. Details: {error}"
+        )
 
 
 def _clean_whisper_output(output: str) -> str:

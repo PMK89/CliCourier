@@ -6,10 +6,13 @@ import pytest
 
 from cli_courier.voice import (
     DisabledTranscriber,
+    FasterWhisperTranscriber,
     TranscriptionDisabled,
     WhisperCppTranscriber,
     transcribe_with_cleanup,
 )
+from cli_courier.telegram_bot.runtime import build_transcriber
+from cli_courier.config import Settings
 
 
 class EchoTranscriber:
@@ -61,3 +64,17 @@ async def test_whisper_cpp_transcriber_uses_local_binary(tmp_path: Path) -> None
     )
 
     assert await transcriber.transcribe(source) == "local transcript"
+
+
+def test_build_transcriber_defaults_to_faster_whisper(tmp_path: Path) -> None:
+    settings = Settings(
+        _env_file=None,
+        TELEGRAM_BOT_TOKEN="123:abc",
+        ALLOWED_TELEGRAM_USER_IDS="42",
+        WORKSPACE_ROOT=str(tmp_path),
+        DEFAULT_AGENT_COMMAND="codex",
+    )
+
+    transcriber = build_transcriber(settings)
+
+    assert isinstance(transcriber, FasterWhisperTranscriber)
