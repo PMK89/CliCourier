@@ -10,17 +10,49 @@ from cli_courier.state import PendingApproval, new_nonce
 
 ApprovalDecision = Literal["approve", "reject"]
 
-_APPROVE_WORDS = {"y", "yes", "approve", "approved", "ok", "okay", "proceed", "continue", "allow"}
-_REJECT_WORDS = {"n", "no", "reject", "rejected", "cancel", "stop", "deny"}
+_APPROVE_WORDS = {
+    "y",
+    "yes",
+    "approve",
+    "approved",
+    "ok",
+    "okay",
+    "proceed",
+    "continue",
+    "allow",
+    "thumbs up",
+    "thumbsup",
+    "heart",
+}
+_REJECT_WORDS = {
+    "n",
+    "no",
+    "reject",
+    "rejected",
+    "cancel",
+    "stop",
+    "deny",
+    "thumbs down",
+    "thumbsdown",
+}
+_APPROVE_EMOJI = {"👍", "❤", "♥"}
+_REJECT_EMOJI = {"👎"}
 _WORD_RE = re.compile(r"^[\s.!?,;:]+|[\s.!?,;:]+$")
+_SKIN_TONE_RE = re.compile("[\U0001f3fb-\U0001f3ff]")
 
 
 def normalize_decision_text(text: str) -> str:
-    return _WORD_RE.sub("", text.strip().lower())
+    normalized = text.replace("\ufe0f", "")
+    normalized = _SKIN_TONE_RE.sub("", normalized)
+    return _WORD_RE.sub("", normalized.strip().lower())
 
 
 def interpret_approval_text(text: str) -> ApprovalDecision | None:
     normalized = normalize_decision_text(text)
+    if normalized in _APPROVE_EMOJI:
+        return "approve"
+    if normalized in _REJECT_EMOJI:
+        return "reject"
     if normalized in _APPROVE_WORDS:
         return "approve"
     if normalized in _REJECT_WORDS:
@@ -59,4 +91,3 @@ def detect_pending_approval(
             message_id=message_id,
         )
     return None
-

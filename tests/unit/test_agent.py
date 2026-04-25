@@ -38,7 +38,13 @@ def test_detect_pending_approval_from_recent_output() -> None:
 
 def test_interpret_approval_words() -> None:
     assert interpret_approval_text("okay") == "approve"
+    assert interpret_approval_text("y") == "approve"
+    assert interpret_approval_text("👍") == "approve"
+    assert interpret_approval_text("👍🏻") == "approve"
+    assert interpret_approval_text("❤️") == "approve"
     assert interpret_approval_text("cancel") == "reject"
+    assert interpret_approval_text("n") == "reject"
+    assert interpret_approval_text("👎") == "reject"
     assert interpret_approval_text("yes, run tests") is None
 
 
@@ -69,3 +75,12 @@ def test_prepare_agent_output_suppresses_codex_prompt_echo() -> None:
     )
 
     assert output == "Final answer"
+
+
+def test_prepare_agent_output_returns_empty_for_prompt_echo_only() -> None:
+    output = prepare_agent_output(
+        "›Pleaseopenawebsitewithplaywright  gpt-5.5 xhigh · ~/CliCourier\n",
+        suppress_trace_lines=True,
+    )
+
+    assert output == ""

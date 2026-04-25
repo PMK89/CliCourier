@@ -29,7 +29,8 @@ active agent, except approval-like words when no approval is pending.
 
 When a prompt is detected, CliCourier also sends inline `Approve` and `Reject` buttons with
 a nonce. Short text replies such as `yes`, `ok`, or `no` are only accepted when an approval
-is pending.
+is pending. Reacting to the approval-request message with thumbs-up or a heart approves;
+thumbs-down rejects.
 
 ## Files
 

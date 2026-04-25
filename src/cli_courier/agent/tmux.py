@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -35,6 +36,7 @@ class TmuxAgentProcess:
         session_name: str | None = None,
         history_lines: int = 300,
         poll_interval_seconds: float = 0.5,
+        submit_delay_seconds: float = 0.35,
     ) -> None:
         if not command:
             raise ValueError("command must not be empty")
@@ -45,6 +47,7 @@ class TmuxAgentProcess:
         self.session_name = safe_tmux_session_name(session_name, workspace=cwd)
         self.history_lines = history_lines
         self.poll_interval_seconds = poll_interval_seconds
+        self.submit_delay_seconds = submit_delay_seconds
         self.output_queue: asyncio.Queue[str] = asyncio.Queue()
         self._reader_task: asyncio.Task[None] | None = None
         self._last_snapshot = ""
@@ -117,6 +120,8 @@ class TmuxAgentProcess:
                 ["tmux", "send-keys", "-t", self.target, "-l", normalized],
                 check=True,
             )
+            if self.submit_delay_seconds > 0:
+                time.sleep(self.submit_delay_seconds)
         key = submit_sequence if submit_sequence and len(submit_sequence) > 1 else "Enter"
         subprocess.run(["tmux", "send-keys", "-t", self.target, key], check=True)
 

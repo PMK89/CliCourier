@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from cli_courier.agent.adapters import get_adapter, list_adapters
-from cli_courier.agent.approval import ApprovalDecision, detect_pending_approval
+from cli_courier.agent.approval import ApprovalDecision, detect_pending_approval, interpret_approval_text
 from cli_courier.agent.chunking import chunk_text
 from cli_courier.agent.output_filter import prepare_agent_output
 from cli_courier.agent.session import AgentSession
@@ -45,7 +45,13 @@ class TelegramBridgeBot:
         self._last_approval_signature: str | None = None
 
     def build_application(self):
-        from telegram.ext import ApplicationBuilder, CallbackQueryHandler, MessageHandler, filters
+        from telegram.ext import (
+            ApplicationBuilder,
+            CallbackQueryHandler,
+            MessageHandler,
+            MessageReactionHandler,
+            filters,
+        )
 
         builder = ApplicationBuilder().token(self.settings.telegram_bot_token.get_secret_value())
         if self.settings.auto_start_agent:
@@ -53,6 +59,7 @@ class TelegramBridgeBot:
         builder = builder.post_shutdown(self._post_shutdown)
         application = builder.build()
         application.add_handler(CallbackQueryHandler(self.handle_callback))
+        application.add_handler(MessageReactionHandler(self.handle_reaction))
         application.add_handler(MessageHandler(filters.ALL, self.handle_update))
         return application
 
@@ -175,6 +182,39 @@ class TelegramBridgeBot:
             else:
                 self.state.clear_pending_voice()
                 await query.edit_message_text("Transcript discarded.")
+
+    async def handle_reaction(self, update, context) -> None:
+        reaction_update = update.message_reaction
+        if reaction_update is None:
+            return
+        identity = self._identity(update)
+        if not is_authorized(identity, self.settings):
+            return
+
+        pending = self.state.pending_approval
+        if pending is None or pending.is_expired():
+            self.state.clear_pending_approval()
+            return
+        if pending.message_id is not None and reaction_update.message_id != pending.message_id:
+            return
+
+        decision = approval_decision_from_reactions(reaction_update.new_reaction)
+        if decision is None:
+            return
+        try:
+            await self._apply_approval(decision)
+        except RuntimeError as exc:
+            await self._safe_send_message(
+                context.bot,
+                chat_id=reaction_update.chat.id,
+                text=str(exc),
+            )
+            return
+        await self._safe_send_message(
+            context.bot,
+            chat_id=reaction_update.chat.id,
+            text=f"Sent {decision}.",
+        )
 
     async def _handle_command(self, command: ParsedCommand, message, context) -> None:
         handlers = {
@@ -578,8 +618,13 @@ class TelegramBridgeBot:
             await message.reply_text(chunk)
 
     def _identity(self, update) -> TelegramIdentity:
-        user = update.effective_user
-        chat = update.effective_chat
+        reaction_update = getattr(update, "message_reaction", None)
+        if reaction_update is not None:
+            user = reaction_update.user
+            chat = reaction_update.chat
+        else:
+            user = update.effective_user
+            chat = update.effective_chat
         return TelegramIdentity(
             user_id=user.id if user is not None else None,
             chat_id=chat.id if chat is not None else None,
@@ -620,6 +665,14 @@ class TelegramBridgeBot:
         except Exception as exc:  # noqa: BLE001 - Telegram errors should not crash the bridge
             print(f"telegram send failed: {exc}", flush=True)
             return None
+
+
+def approval_decision_from_reactions(reactions) -> ApprovalDecision | None:
+    for reaction in reversed(reactions):
+        decision = interpret_approval_text(getattr(reaction, "emoji", ""))
+        if decision is not None:
+            return decision
+    return None
 
 
 def build_transcriber(settings: Settings) -> Transcriber:

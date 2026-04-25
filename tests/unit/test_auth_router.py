@@ -6,6 +6,7 @@ from cli_courier.config import Settings
 from cli_courier.telegram_bot.auth import TelegramIdentity, is_authorized
 from cli_courier.telegram_bot.commands import parse_command
 from cli_courier.telegram_bot.router import RouteKind, route_text
+from cli_courier.telegram_bot.runtime import approval_decision_from_reactions
 
 
 def settings(root: Path, **overrides) -> Settings:
@@ -53,6 +54,27 @@ def test_route_maps_approval_when_pending() -> None:
     assert route.approval_decision == "approve"
 
 
+def test_route_maps_emoji_approval_when_pending() -> None:
+    route = route_text("👍", has_pending_approval=True)
+    assert route.kind == RouteKind.APPROVAL
+    assert route.approval_decision == "approve"
+
+    route = route_text("👎", has_pending_approval=True)
+    assert route.kind == RouteKind.APPROVAL
+    assert route.approval_decision == "reject"
+
+
 def test_route_sends_regular_text_to_agent() -> None:
     route = route_text("please inspect the diff", has_pending_approval=False)
     assert route.kind == RouteKind.AGENT_TEXT
+
+
+class FakeReaction:
+    def __init__(self, emoji: str) -> None:
+        self.emoji = emoji
+
+
+def test_reaction_approval_mapping() -> None:
+    assert approval_decision_from_reactions([FakeReaction("👍")]) == "approve"
+    assert approval_decision_from_reactions([FakeReaction("❤️")]) == "approve"
+    assert approval_decision_from_reactions([FakeReaction("👎")]) == "reject"

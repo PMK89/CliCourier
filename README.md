@@ -169,6 +169,10 @@ All non-command text from an allowlisted user is sent to the active agent, excep
 approval-like words such as `yes` or `approve` when no approval is pending. Use
 `/agent yes` to send those words literally.
 
+When an approval is pending, `yes`, `y`, `ok`, 👍, or a heart approve it; `no`, `n`, or
+👎 reject it. You can also react directly to the approval-request Telegram message with
+thumbs-up/heart or thumbs-down.
+
 By default `AGENT_OUTPUT_MODE=final`, so CliCourier waits for a quiet period before sending
 agent output to Telegram and suppresses common reasoning/tool/status trace lines. Set
 `AGENT_OUTPUT_MODE=stream` if you want raw streaming output.

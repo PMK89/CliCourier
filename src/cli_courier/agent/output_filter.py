@@ -13,7 +13,7 @@ TRACE_LINE_PATTERNS = tuple(
         r"^\s*(executing|reading|searching|editing|applying patch|observing)\b.*$",
         r"^\s*(bash|shell|python|apply_patch|functions\.[a-z_]+|web\.[a-z_]+)\s*(\(|:|$).*$",
         r"^\s*(tokens|context window|model:|cwd:|sandbox:)\b.*$",
-        r"^\s*›.*\b(?:gpt-|claude|gemini|~/|/).*$",
+        r"^\s*›.*$",
         r"^\s*[-*]\s*(ran|read|opened|searched|updated|patched)\b.*$",
     )
 )
@@ -29,9 +29,7 @@ def prepare_agent_output(text: str, *, suppress_trace_lines: bool = True) -> str
 
     filtered = [line for line in lines if not _looks_like_trace_line(line)]
     filtered = _trim_blank_edges(filtered)
-    if filtered:
-        return "\n".join(filtered).strip()
-    return "\n".join(lines).strip()
+    return "\n".join(filtered).strip()
 
 
 def _looks_like_trace_line(line: str) -> bool:
