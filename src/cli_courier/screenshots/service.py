@@ -16,6 +16,11 @@ class ScreenshotArtifact:
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+DEFAULT_SCREENSHOT_DIRS = (
+    Path("output/playwright"),
+    Path("output"),
+    Path(".playwright-cli"),
+)
 
 
 class ScreenshotService:
@@ -34,14 +39,14 @@ class ScreenshotService:
         self._validate_directory()
 
     def latest(self) -> ScreenshotArtifact:
-        if self.screenshot_dir is None:
-            raise ScreenshotError("SCREENSHOT_DIR is not configured")
-        if not self.screenshot_dir.exists() or not self.screenshot_dir.is_dir():
-            raise ScreenshotError(f"SCREENSHOT_DIR is not a directory: {self.screenshot_dir}")
+        directories = self._search_directories()
+        if not directories:
+            raise ScreenshotError("SCREENSHOT_DIR is not configured and no default screenshot directory exists")
 
         candidates = [
             path
-            for path in self.screenshot_dir.iterdir()
+            for directory in directories
+            for path in directory.rglob("*")
             if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
         ]
         if not candidates:
@@ -75,6 +80,19 @@ class ScreenshotService:
         if mime_type is None:
             raise ScreenshotError("latest screenshot does not look like a supported image")
         return ScreenshotArtifact(path=resolved, mime_type=mime_type, size=size)
+
+    def _search_directories(self) -> list[Path]:
+        if self.screenshot_dir is not None:
+            if not self.screenshot_dir.exists() or not self.screenshot_dir.is_dir():
+                raise ScreenshotError(f"SCREENSHOT_DIR is not a directory: {self.screenshot_dir}")
+            return [self.screenshot_dir]
+
+        directories = []
+        for relative in DEFAULT_SCREENSHOT_DIRS:
+            candidate = (self.workspace_root / relative).resolve()
+            if candidate.exists() and candidate.is_dir():
+                directories.append(candidate)
+        return directories
 
 
 def sniff_image_mime(path: Path) -> str | None:

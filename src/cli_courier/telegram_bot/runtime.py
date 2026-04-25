@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import tempfile
 from pathlib import Path
 
@@ -42,6 +43,7 @@ class TelegramBridgeBot:
         self.screenshot_service = screenshot_service
         self.transcriber = transcriber
         self._flush_tasks: set[asyncio.Task[None]] = set()
+        self._typing_tasks: dict[int, asyncio.Task[None]] = {}
         self._last_approval_signature: str | None = None
         self._agent_context_sent = False
 
@@ -101,6 +103,11 @@ class TelegramBridgeBot:
         if self._flush_tasks:
             await asyncio.gather(*self._flush_tasks, return_exceptions=True)
             self._flush_tasks.clear()
+        for task in list(self._typing_tasks.values()):
+            task.cancel()
+        if self._typing_tasks:
+            await asyncio.gather(*self._typing_tasks.values(), return_exceptions=True)
+            self._typing_tasks.clear()
         agent = self.state.active_agent
         if agent is not None:
             await agent.stop()
@@ -133,11 +140,11 @@ class TelegramBridgeBot:
         if route.kind == RouteKind.COMMAND and route.command is not None:
             await self._handle_command(route.command, message, context)
         elif route.kind == RouteKind.APPROVAL and route.approval_decision is not None:
-            await self._handle_approval(route.approval_decision, message)
+            await self._handle_approval(route.approval_decision, message, context)
         elif route.kind == RouteKind.BLOCKED_APPROVAL:
             await message.reply_text("No approval is pending. Use /agent yes to send that text anyway.")
         elif route.kind == RouteKind.AGENT_TEXT:
-            await self._send_to_agent(route.text, message)
+            await self._send_to_agent(route.text, message, context)
 
     async def handle_callback(self, update, context) -> None:
         query = update.callback_query
@@ -332,7 +339,7 @@ class TelegramBridgeBot:
         if not args:
             await message.reply_text("Usage: /agent <text>")
             return
-        await self._send_to_agent(args, message)
+        await self._send_to_agent(args, message, context)
 
     async def _cmd_agents(self, args: str, message, context) -> None:
         lines = [
@@ -412,10 +419,10 @@ class TelegramBridgeBot:
             )
 
     async def _cmd_approve(self, args: str, message, context) -> None:
-        await self._handle_approval("approve", message)
+        await self._handle_approval("approve", message, context)
 
     async def _cmd_reject(self, args: str, message, context) -> None:
-        await self._handle_approval("reject", message)
+        await self._handle_approval("reject", message, context)
 
     async def _cmd_voice_approve(self, args: str, message, context) -> None:
         pending = self.state.pending_voice
@@ -424,6 +431,7 @@ class TelegramBridgeBot:
             await message.reply_text("No voice transcript is pending.")
             return
         try:
+            self._start_typing(context.bot, message.chat_id)
             await self._send_to_agent_text(pending.transcript)
         except RuntimeError as exc:
             await message.reply_text(str(exc))
@@ -502,10 +510,12 @@ class TelegramBridgeBot:
             reply_markup=keyboard,
         )
 
-    async def _send_to_agent(self, text: str, message) -> None:
+    async def _send_to_agent(self, text: str, message, context) -> None:
+        self._start_typing(context.bot, message.chat_id)
         try:
             await self._send_to_agent_text(text)
         except RuntimeError as exc:
+            self._stop_typing(message.chat_id)
             await message.reply_text(str(exc))
 
     async def _send_to_agent_text(self, text: str) -> None:
@@ -514,12 +524,13 @@ class TelegramBridgeBot:
             raise RuntimeError("Agent is not running. Use /start_agent first.")
         await agent.send_text(self._agent_user_text(text))
 
-    async def _handle_approval(self, decision: ApprovalDecision, message) -> None:
+    async def _handle_approval(self, decision: ApprovalDecision, message, context) -> None:
         pending = self.state.pending_approval
         if pending is None or pending.is_expired():
             self.state.clear_pending_approval()
             await message.reply_text("No approval is pending.")
             return
+        self._start_typing(context.bot, message.chat_id)
         await self._apply_approval(decision)
         await message.reply_text(f"Sent {decision}.")
 
@@ -582,6 +593,7 @@ class TelegramBridgeBot:
                         suppress_trace_lines=self.settings.suppress_agent_trace_lines,
                     )
                     await self._send_agent_output(bot, chat_id, final_text)
+                    self._stop_typing(chat_id)
                 pending_text = ""
                 first_output_at = None
                 last_output_at = None
@@ -615,14 +627,37 @@ class TelegramBridgeBot:
             text=f"Approval requested:\n{pending.prompt_excerpt}",
             reply_markup=keyboard,
         )
+        self._stop_typing(chat_id)
         if sent is not None:
             pending.message_id = sent.message_id
 
     async def _send_agent_output(self, bot, chat_id: int, text: str) -> None:
         if self._notifications_muted() or not text.strip():
             return
+        if looks_like_screenshot_summary(text) and await self._send_latest_screenshot(bot, chat_id):
+            return
         for chunk in chunk_text(text, self.settings.max_telegram_chunk_chars):
             await self._safe_send_message(bot, chat_id=chat_id, text=chunk)
+
+    async def _send_latest_screenshot(self, bot, chat_id: int) -> bool:
+        try:
+            artifact = self.screenshot_service.latest()
+        except ScreenshotError:
+            return False
+        try:
+            with artifact.path.open("rb") as file_obj:
+                if artifact.mime_type in {"image/png", "image/jpeg"}:
+                    await bot.send_photo(chat_id=chat_id, photo=file_obj)
+                else:
+                    await bot.send_document(
+                        chat_id=chat_id,
+                        document=file_obj,
+                        filename=artifact.path.name,
+                    )
+        except Exception as exc:  # noqa: BLE001 - Telegram errors should not crash the bridge
+            print(f"telegram screenshot send failed: {exc}", flush=True)
+            return False
+        return True
 
     async def _reply_chunks(self, message, text: str) -> None:
         for chunk in chunk_text(text, self.settings.max_telegram_chunk_chars):
@@ -675,6 +710,30 @@ class TelegramBridgeBot:
         self._agent_context_sent = True
         return f"{self._agent_initial_prompt()}\n\nUser request:\n{text}"
 
+    def _start_typing(self, bot, chat_id: int) -> None:
+        if self._notifications_muted():
+            return
+        if chat_id in self._typing_tasks:
+            return
+        task = asyncio.create_task(self._typing_loop(bot, chat_id))
+        self._typing_tasks[chat_id] = task
+        task.add_done_callback(lambda _task: self._typing_tasks.pop(chat_id, None))
+
+    def _stop_typing(self, chat_id: int) -> None:
+        task = self._typing_tasks.pop(chat_id, None)
+        if task is not None:
+            task.cancel()
+
+    async def _typing_loop(self, bot, chat_id: int) -> None:
+        try:
+            while True:
+                await bot.send_chat_action(chat_id=chat_id, action="typing")
+                await asyncio.sleep(4)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - chat action failures should not crash the bridge
+            print(f"telegram typing action failed: {exc}", flush=True)
+
     def _create_background_task(self, application, coroutine) -> asyncio.Task:
         if getattr(application, "running", False):
             return application.create_task(coroutine)
@@ -694,6 +753,16 @@ def approval_decision_from_reactions(reactions) -> ApprovalDecision | None:
         if decision is not None:
             return decision
     return None
+
+
+SCREENSHOT_SUMMARY_RE = re.compile(
+    r"^\s*(?:Size:\s*)?\d{2,5}\s*x\s*\d{2,5}\s+(?:PNG|JPE?G|WEBP)\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def looks_like_screenshot_summary(text: str) -> bool:
+    return SCREENSHOT_SUMMARY_RE.fullmatch(text.strip()) is not None
 
 
 def build_transcriber(settings: Settings) -> Transcriber:

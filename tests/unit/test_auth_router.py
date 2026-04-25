@@ -9,7 +9,11 @@ from cli_courier.state import RuntimeState
 from cli_courier.telegram_bot.auth import TelegramIdentity, is_authorized
 from cli_courier.telegram_bot.commands import parse_command
 from cli_courier.telegram_bot.router import RouteKind, route_text
-from cli_courier.telegram_bot.runtime import TelegramBridgeBot, approval_decision_from_reactions
+from cli_courier.telegram_bot.runtime import (
+    TelegramBridgeBot,
+    approval_decision_from_reactions,
+    looks_like_screenshot_summary,
+)
 from cli_courier.voice import DisabledTranscriber
 
 
@@ -82,6 +86,12 @@ def test_reaction_approval_mapping() -> None:
     assert approval_decision_from_reactions([FakeReaction("👍")]) == "approve"
     assert approval_decision_from_reactions([FakeReaction("❤️")]) == "approve"
     assert approval_decision_from_reactions([FakeReaction("👎")]) == "reject"
+
+
+def test_screenshot_summary_detection() -> None:
+    assert looks_like_screenshot_summary("Size: 1280x720 PNG.")
+    assert looks_like_screenshot_summary("1280x720 jpeg")
+    assert not looks_like_screenshot_summary("The screenshot is attached.")
 
 
 def test_initial_agent_context_is_prepended_once(tmp_path: Path) -> None:

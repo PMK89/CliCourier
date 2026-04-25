@@ -28,6 +28,21 @@ def test_latest_screenshot_returns_newest_valid_image(tmp_path: Path) -> None:
     assert service.latest().path == new.resolve()
 
 
+def test_latest_screenshot_uses_default_workspace_artifact_dirs(tmp_path: Path) -> None:
+    screenshot_dir = tmp_path / "output" / "playwright"
+    screenshot_dir.mkdir(parents=True)
+    screenshot = screenshot_dir / "page.png"
+    screenshot.write_bytes(PNG_BYTES)
+
+    service = ScreenshotService(
+        workspace_root=tmp_path,
+        screenshot_dir=None,
+        max_bytes=1024,
+    )
+
+    assert service.latest().path == screenshot.resolve()
+
+
 def test_latest_screenshot_rejects_bad_mime(tmp_path: Path) -> None:
     (tmp_path / "bad.png").write_text("not an image", encoding="utf-8")
     service = ScreenshotService(
