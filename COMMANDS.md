@@ -58,7 +58,7 @@ to the agent without confirmation.
 
 | Command | Description |
 | --- | --- |
-| `clicourier init` | Prompt for Telegram token, user id, workspace, CLI command, local Whisper defaults, and write local config. |
+| `clicourier init` | Prompt for Telegram token, user id, workspace, CLI command, local Whisper defaults, and write local config. Existing config values are reused as defaults. |
 | `clicourier doctor` | Check platform, config, Telegram settings, agent command, ffmpeg, faster-whisper, and model cache status. |
 | `clicourier config` | Print config path and a redacted non-secret summary. |
 | `clicourier model download` | Download/load the configured faster-whisper model. |

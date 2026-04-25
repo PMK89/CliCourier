@@ -60,7 +60,7 @@ local executables/data; install those only from sources you trust.
 ### Local Mute Toggle
 
 Anyone who can create `NOTIFICATION_BLOCK_FILE` can suppress proactive Telegram output.
-Place it in a user-owned directory such as `~/.local/state/clicourier`.
+The default file is `muted` in the project working directory.
 
 ## Hardening Notes
 

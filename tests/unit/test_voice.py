@@ -11,6 +11,7 @@ from cli_courier.voice import (
     WhisperCppTranscriber,
     transcribe_with_cleanup,
 )
+from cli_courier.voice.transcriber import resolve_faster_whisper_model
 from cli_courier.telegram_bot.runtime import build_transcriber
 from cli_courier.config import Settings
 
@@ -78,3 +79,8 @@ def test_build_transcriber_defaults_to_faster_whisper(tmp_path: Path) -> None:
     transcriber = build_transcriber(settings)
 
     assert isinstance(transcriber, FasterWhisperTranscriber)
+
+
+def test_turbo_model_alias_resolves_to_faster_whisper_name() -> None:
+    assert resolve_faster_whisper_model("turbo") == "large-v3-turbo"
+    assert resolve_faster_whisper_model("small") == "small"

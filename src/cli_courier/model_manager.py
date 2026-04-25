@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cli_courier.config import Settings
+from cli_courier.voice.transcriber import resolve_faster_whisper_model
 
 
 KNOWN_LOCAL_MODELS = (
@@ -11,7 +12,9 @@ KNOWN_LOCAL_MODELS = (
     "base",
     "small",
     "medium",
+    "turbo",
     "large-v3",
+    "large-v3-turbo",
     "distil-small.en",
     "distil-medium.en",
     "distil-large-v3",
@@ -26,7 +29,8 @@ class ModelCacheStatus:
 
 
 def download_model(settings: Settings, *, model_name: str | None = None) -> None:
-    name = model_name or settings.whisper_model
+    configured_name = model_name or settings.whisper_model
+    name = resolve_faster_whisper_model(configured_name)
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:
@@ -75,4 +79,3 @@ def format_model_list(settings: Settings) -> str:
         lines.append(f"cache_dir: {cache.cache_dir}")
     lines.append("known models: " + ", ".join(KNOWN_LOCAL_MODELS))
     return "\n".join(lines)
-

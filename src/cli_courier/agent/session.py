@@ -62,7 +62,7 @@ class AgentSession:
         await self.start()
 
     async def send_text(self, text: str) -> None:
-        await self._process.send_line(text)
+        await self._process.send_line(text, submit_sequence=self.adapter.submit_sequence)
 
     def recent_output(self, max_chars: int | None = None) -> str:
         return self._buffer.recent(max_chars)
@@ -81,4 +81,3 @@ class AgentSession:
             normalized = self.adapter.normalize_output(raw)
             self._buffer.append(normalized)
             await self.output_queue.put(normalized)
-

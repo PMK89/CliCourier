@@ -43,6 +43,7 @@ def test_settings_parse_required_values(tmp_path: Path) -> None:
     assert settings.whisper_model == "small"
     assert settings.whisper_compute_type == "int8"
     assert settings.whisper_device == "cpu"
+    assert settings.agent_initial_prompt_enabled is True
 
 
 def test_settings_requires_existing_workspace(tmp_path: Path) -> None:
@@ -103,7 +104,7 @@ def test_load_settings_reads_local_config_file(tmp_path: Path) -> None:
         {
             "TELEGRAM_BOT_TOKEN": "123:abc",
             "ALLOWED_TELEGRAM_USER_IDS": "42",
-            "WORKSPACE_ROOT": str(tmp_path),
+            "WORKSPACE_ROOT": ".",
             "DEFAULT_AGENT_COMMAND": "gemini",
             "DEFAULT_AGENT_ADAPTER": "generic",
             "DEFAULT_TELEGRAM_CHAT_ID": "",
@@ -117,3 +118,20 @@ def test_load_settings_reads_local_config_file(tmp_path: Path) -> None:
     assert settings.allowed_telegram_user_ids == (42,)
     assert settings.default_agent_command == "gemini"
     assert settings.whisper_model == "base"
+
+
+def test_relative_workspace_root_resolves_from_start_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings(
+        _env_file=None,
+        TELEGRAM_BOT_TOKEN="123:abc",
+        ALLOWED_TELEGRAM_USER_IDS="42",
+        WORKSPACE_ROOT=".",
+        DEFAULT_AGENT_COMMAND="codex",
+    )
+
+    assert settings.workspace_root == tmp_path.resolve()

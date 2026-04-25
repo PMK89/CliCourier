@@ -83,10 +83,16 @@ class PtyAgentProcess:
         self._child = None
         self._reader_task = None
 
-    async def send_line(self, text: str) -> None:
+    async def send_line(self, text: str, *, submit_sequence: str = "\r") -> None:
         if not self.is_running or self._child is None:
             raise RuntimeError("agent process is not running")
-        await asyncio.to_thread(self._child.sendline, text)
+        await asyncio.to_thread(self._send_text_with_submit, text, submit_sequence)
+
+    def _send_text_with_submit(self, text: str, submit_sequence: str) -> None:
+        assert self._child is not None
+        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        self._child.send(normalized)
+        self._child.send(submit_sequence)
 
     async def _read_loop(self) -> None:
         assert self._child is not None
@@ -100,4 +106,3 @@ class PtyAgentProcess:
                 break
             if output:
                 await self.output_queue.put(output)
-

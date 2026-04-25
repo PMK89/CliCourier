@@ -114,6 +114,17 @@ class Settings(BaseSettings):
     agent_env_allowlist: tuple[str, ...] = Field(default=(), alias="AGENT_ENV_ALLOWLIST")
     agent_output_mode: AgentOutputMode = Field(default=AgentOutputMode.FINAL, alias="AGENT_OUTPUT_MODE")
     suppress_agent_trace_lines: bool = Field(default=True, alias="SUPPRESS_AGENT_TRACE_LINES")
+    agent_initial_prompt_enabled: bool = Field(default=True, alias="AGENT_INITIAL_PROMPT_ENABLED")
+    agent_initial_prompt: str = Field(
+        default=(
+            "You are being controlled through CliCourier, a private Telegram bridge for a "
+            "trusted user. Keep final responses concise and useful in Telegram. Do not "
+            "expose secrets. When you need approval for a local action, ask clearly so the "
+            "bridge can surface approve/reject controls. The bridge forwards final output "
+            "and may suppress intermediate tool or reasoning traces."
+        ),
+        alias="AGENT_INITIAL_PROMPT",
+    )
     auto_start_agent: bool = Field(default=False, alias="AUTO_START_AGENT")
     default_telegram_chat_id: int | None = Field(default=None, alias="DEFAULT_TELEGRAM_CHAT_ID")
     notification_block_file: Path = Field(
@@ -275,10 +286,11 @@ def load_settings(config_path: Path | None = None) -> Settings:
     configured = config_path or (Path(env_config).expanduser() if env_config else None)
     if configured is not None and configured.exists():
         env_files.append(configured)
-    default_path = default_config_path()
-    if default_path.exists() and default_path not in env_files:
-        env_files.append(default_path)
-    cwd_env = Path(".env")
-    if cwd_env.exists():
-        env_files.append(cwd_env)
+    else:
+        default_path = default_config_path()
+        if default_path.exists():
+            env_files.append(default_path)
+        cwd_env = Path(".env")
+        if cwd_env.exists():
+            env_files.append(cwd_env)
     return Settings(_env_file=tuple(env_files) if env_files else None)

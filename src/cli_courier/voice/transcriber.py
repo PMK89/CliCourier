@@ -54,7 +54,7 @@ class FasterWhisperTranscriber:
         model_dir: Path | None = None,
         ffmpeg_binary: str = "ffmpeg",
     ) -> None:
-        self.model = model
+        self.model = resolve_faster_whisper_model(model)
         self.device = device
         self.compute_type = compute_type
         self.model_dir = model_dir
@@ -97,6 +97,13 @@ class FasterWhisperTranscriber:
             if not transcript:
                 raise RuntimeError("local Whisper returned an empty transcript")
             return transcript
+
+
+def resolve_faster_whisper_model(model: str) -> str:
+    normalized = model.strip()
+    if normalized == "turbo":
+        return "large-v3-turbo"
+    return normalized
 
 
 class WhisperCppTranscriber:

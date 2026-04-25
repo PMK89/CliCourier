@@ -50,6 +50,7 @@ class TelegramBridgeBot:
         builder = ApplicationBuilder().token(self.settings.telegram_bot_token.get_secret_value())
         if self.settings.auto_start_agent:
             builder = builder.post_init(self._post_init)
+        builder = builder.post_shutdown(self._post_shutdown)
         application = builder.build()
         application.add_handler(CallbackQueryHandler(self.handle_callback))
         application.add_handler(MessageHandler(filters.ALL, self.handle_update))
@@ -58,6 +59,19 @@ class TelegramBridgeBot:
     async def _post_init(self, application) -> None:
         if self.settings.default_telegram_chat_id is None:
             return
+        if not self._notifications_muted():
+            reachable = await self._safe_send_message(
+                application.bot,
+                chat_id=self.settings.default_telegram_chat_id,
+                text="CliCourier connected. Starting agent...",
+            )
+            if reachable is None:
+                print(
+                    "auto-start skipped: DEFAULT_TELEGRAM_CHAT_ID is not reachable. "
+                    "Open the bot in Telegram and send /start, or clear DEFAULT_TELEGRAM_CHAT_ID.",
+                    flush=True,
+                )
+                return
         try:
             message = await self._start_agent_session(
                 chat_id=self.settings.default_telegram_chat_id,
@@ -67,10 +81,22 @@ class TelegramBridgeBot:
             print(f"failed to auto-start agent: {exc}", flush=True)
             return
         if not self._notifications_muted():
-            await application.bot.send_message(
+            await self._safe_send_message(
+                application.bot,
                 chat_id=self.settings.default_telegram_chat_id,
                 text=message,
             )
+
+    async def _post_shutdown(self, application) -> None:
+        for task in list(self._flush_tasks):
+            task.cancel()
+        if self._flush_tasks:
+            await asyncio.gather(*self._flush_tasks, return_exceptions=True)
+            self._flush_tasks.clear()
+        agent = self.state.active_agent
+        if agent is not None:
+            await agent.stop()
+            self.state.active_agent = None
 
     async def handle_update(self, update, context) -> None:
         identity = self._identity(update)
@@ -231,7 +257,12 @@ class TelegramBridgeBot:
         self.state.active_agent = session
         self.state.agent_chat_id = chat_id
         self._last_approval_signature = None
-        task = application.create_task(self._flush_agent_output(application.bot, chat_id, session))
+        if self.settings.agent_initial_prompt_enabled and self.settings.agent_initial_prompt.strip():
+            await session.send_text(self._agent_initial_prompt())
+        task = self._create_background_task(
+            application,
+            self._flush_agent_output(application.bot, chat_id, session),
+        )
         self._flush_tasks.add(task)
         task.add_done_callback(self._flush_tasks.discard)
         return f"Agent started: {' '.join(command)}"
@@ -522,18 +553,20 @@ class TelegramBridgeBot:
                 ]
             ]
         )
-        sent = await bot.send_message(
+        sent = await self._safe_send_message(
+            bot,
             chat_id=chat_id,
             text=f"Approval requested:\n{pending.prompt_excerpt}",
             reply_markup=keyboard,
         )
-        pending.message_id = sent.message_id
+        if sent is not None:
+            pending.message_id = sent.message_id
 
     async def _send_agent_output(self, bot, chat_id: int, text: str) -> None:
         if self._notifications_muted() or not text.strip():
             return
         for chunk in chunk_text(text, self.settings.max_telegram_chunk_chars):
-            await bot.send_message(chat_id=chat_id, text=chunk)
+            await self._safe_send_message(bot, chat_id=chat_id, text=chunk)
 
     async def _reply_chunks(self, message, text: str) -> None:
         for chunk in chunk_text(text, self.settings.max_telegram_chunk_chars):
@@ -554,6 +587,29 @@ class TelegramBridgeBot:
     def _approval_pending(self) -> bool:
         pending = self.state.pending_approval
         return pending is not None and not pending.is_expired()
+
+    def _agent_initial_prompt(self) -> str:
+        prompt = " ".join(self.settings.agent_initial_prompt.split())
+        return " ".join(
+            (
+                prompt,
+                f"CliCourier workspace root: {self.settings.workspace_root}.",
+                "If the user asks about bridge behavior, mention that Telegram slash commands "
+                "control files, screenshots, voice approval, mute/unmute, and agent approvals.",
+            )
+        )
+
+    def _create_background_task(self, application, coroutine) -> asyncio.Task:
+        if getattr(application, "running", False):
+            return application.create_task(coroutine)
+        return asyncio.create_task(coroutine)
+
+    async def _safe_send_message(self, bot, **kwargs):
+        try:
+            return await bot.send_message(**kwargs)
+        except Exception as exc:  # noqa: BLE001 - Telegram errors should not crash the bridge
+            print(f"telegram send failed: {exc}", flush=True)
+            return None
 
 
 def build_transcriber(settings: Settings) -> Transcriber:

@@ -15,6 +15,7 @@ class AgentAdapter(Protocol):
     approval_patterns: tuple[re.Pattern[str], ...]
     approve_input: str
     reject_input: str
+    submit_sequence: str
 
     def build_command(self, configured_command: str | None = None) -> list[str]: ...
 
@@ -31,6 +32,7 @@ class BaseAdapter:
     approval_patterns: tuple[re.Pattern[str], ...]
     approve_input: str = "y"
     reject_input: str = "n"
+    submit_sequence: str = "\r"
 
     def build_command(self, configured_command: str | None = None) -> list[str]:
         if configured_command:
@@ -97,4 +99,3 @@ def get_adapter(adapter_id: str) -> AgentAdapter:
         return adapters[adapter_id]
     except KeyError as exc:
         raise ValueError(f"unknown agent adapter: {adapter_id}") from exc
-

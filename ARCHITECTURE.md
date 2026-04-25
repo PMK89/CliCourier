@@ -91,8 +91,9 @@ writes a PID file under `~/.local/state/clicourier`, and logs stdout/stderr ther
 daemon sets `AUTO_START_AGENT=true`, so the configured or supplied CLI command starts when
 Telegram polling begins.
 
-`NOTIFICATION_BLOCK_FILE` is a simple mute toggle. When the file exists, proactive agent
-output and approval prompts are not sent to Telegram; command replies still work.
+`NOTIFICATION_BLOCK_FILE` is a simple mute toggle. The generated default is `muted`, placed
+in the project working directory. When the file exists, proactive agent output and approval
+prompts are not sent to Telegram; command replies still work.
 
 ## Voice Model
 

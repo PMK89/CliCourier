@@ -66,7 +66,7 @@ Create `.env` from `.env.example` and fill in the required values:
 ```bash
 TELEGRAM_BOT_TOKEN=123456:replace-me
 ALLOWED_TELEGRAM_USER_IDS=123456789
-WORKSPACE_ROOT=/absolute/path/to/workspace
+WORKSPACE_ROOT=.
 DEFAULT_AGENT_COMMAND=codex
 ```
 
@@ -76,8 +76,12 @@ Or run the interactive setup:
 clicourier init
 ```
 
-This writes `~/.config/clicourier/config.env` and can install a `~/.local/bin/clicourier`
-launcher for source-tree use.
+This writes `~/.config/clicourier/config.env`. If the file already exists, `init` loads
+its current values as prompt defaults and asks before writing the updated config.
+
+`WORKSPACE_ROOT=.` means the project directory where you start `clicourier`. This is the
+recommended workflow: `cd` into your project, then run `clicourier run` or
+`clicourier start`.
 
 Useful optional settings:
 
@@ -94,12 +98,21 @@ WHISPER_DEVICE=cpu
 WHISPER_MODEL_DIR=
 FFMPEG_BINARY=ffmpeg
 AGENT_OUTPUT_MODE=final
-NOTIFICATION_BLOCK_FILE=/home/you/.local/state/clicourier/muted
+NOTIFICATION_BLOCK_FILE=muted
 MAX_TELEGRAM_CHUNK_CHARS=3500
 ```
 
 `AGENT_ENV_ALLOWLIST` is only needed for environment variables the child CLI agent must
 see. Bridge secrets are not forwarded by default.
+
+`DEFAULT_TELEGRAM_CHAT_ID` is only for proactive background output, such as auto-start
+messages before you send a command. The bot can only message a private chat after you have
+opened the bot in Telegram and sent `/start`; if the chat is not reachable, CliCourier now
+logs that and keeps polling instead of crashing.
+
+`AGENT_INITIAL_PROMPT_ENABLED=true` sends a short one-time context note to the CLI agent
+when it starts, explaining that it is being controlled through CliCourier and should keep
+Telegram-facing final output concise.
 
 Security-sensitive defaults are conservative: group chats are disabled, screenshot
 directories must stay under `WORKSPACE_ROOT`, sensitive files are not sent, and
@@ -113,8 +126,10 @@ clicourier model list
 ```
 
 Voice transcription defaults to local `faster-whisper`, CPU device, and `int8` compute.
-The default model is `small`, configurable with `WHISPER_MODEL`. Models are downloaded
-lazily on first use or explicitly through `clicourier model download`.
+The default model is `small`, configurable with `WHISPER_MODEL`. Recommended CPU choices
+are `base`, `small`, and `turbo`; `turbo` is accepted as an alias for
+`large-v3-turbo`. Models are downloaded lazily on first use or explicitly through
+`clicourier model download`.
 
 Telegram voice messages are OGG/Opus. CliCourier converts them to 16 kHz mono WAV with
 `ffmpeg` before transcription, so `ffmpeg` must be installed and available on PATH.
@@ -154,6 +169,7 @@ clicourier unmute
 ```
 
 The same toggle is available from Telegram with `/mute`, `/unmute`, and `/mute_status`.
+By default this creates a `muted` file in the project working directory.
 
 ## Development
 

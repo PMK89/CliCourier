@@ -7,10 +7,13 @@ import sys
 from getpass import getpass
 from pathlib import Path
 
+from dotenv import dotenv_values
+
 from cli_courier.local_config import (
     default_config_path,
     default_data_dir,
     default_mute_file,
+    default_state_dir,
     default_whisper_dir,
     ensure_private_parent,
     write_env_file,
@@ -24,7 +27,7 @@ def prompt(
     secret: bool = False,
     required: bool = True,
 ) -> str:
-    suffix = f" [{default}]" if default else ""
+    suffix = " [configured, press Enter to keep]" if secret and default else f" [{default}]" if default else ""
     while True:
         if secret:
             value = getpass(f"{label}{suffix}: ")
@@ -63,9 +66,9 @@ def init_config(
     install_launcher: bool = False,
 ) -> Path:
     config_path = config_path.expanduser()
-    if config_path.exists() and not force:
-        if not interactive or not yes_no(f"{config_path} exists. Overwrite it", default=False):
-            raise FileExistsError(f"config already exists: {config_path}")
+    existing = read_existing_config(config_path) if config_path.exists() else {}
+    if config_path.exists() and not force and not interactive:
+        raise FileExistsError(f"config already exists: {config_path}")
 
     if not interactive:
         values = default_config_values()
@@ -74,33 +77,67 @@ def init_config(
 
     print("CliCourier init")
     print(f"Config file: {config_path.expanduser()}")
-    token = prompt("Telegram bot token", secret=True)
-    user_ids = prompt("Allowed Telegram user id(s), comma-separated")
-    default_chat = prompt("Default private chat id", default=user_ids.split(",", 1)[0].strip())
-    workspace = prompt("Workspace root", default=str(Path.cwd()))
-    agent_command = prompt("CLI tool command", default="codex")
-    adapter = prompt("Agent adapter", default=infer_adapter(agent_command))
-    auto_start = "true" if yes_no("Start the CLI tool automatically when the daemon starts") else "false"
-    mute_file = prompt("Mute/block file", default=str(default_mute_file()))
+    if existing:
+        print("Existing config found; using current values as defaults.")
+    token = prompt("Telegram bot token", default=existing_value(existing, "TELEGRAM_BOT_TOKEN"), secret=True)
+    user_ids = prompt(
+        "Allowed Telegram user id(s), comma-separated",
+        default=existing_value(existing, "ALLOWED_TELEGRAM_USER_IDS"),
+    )
+    default_chat = prompt(
+        "Default private chat id for proactive output",
+        default=existing_value(existing, "DEFAULT_TELEGRAM_CHAT_ID", ""),
+        required=False,
+    )
+    workspace = prompt("Workspace root", default=default_workspace_prompt_value(existing))
+    agent_command = prompt(
+        "CLI tool command",
+        default=existing_value(existing, "DEFAULT_AGENT_COMMAND", "codex"),
+    )
+    previous_agent_command = existing_value(existing, "DEFAULT_AGENT_COMMAND")
+    adapter_default = (
+        existing_value(existing, "DEFAULT_AGENT_ADAPTER", infer_adapter(agent_command))
+        if previous_agent_command == agent_command
+        else infer_adapter(agent_command)
+    )
+    adapter = prompt(
+        "Agent adapter",
+        default=adapter_default,
+    )
+    auto_start = "true" if yes_no(
+        "Start the CLI tool automatically when the daemon starts",
+        default=existing_value(existing, "AUTO_START_AGENT", "false").lower() == "true",
+    ) else "false"
+    mute_file = prompt(
+        "Mute/block file name or path",
+        default=default_mute_prompt_value(existing),
+    )
 
-    backend = prompt("Whisper backend (local/none/openai/whisper_cpp)", default="local")
+    backend = prompt(
+        "Whisper backend (local/none/openai/whisper_cpp)",
+        default=existing_value(existing, "WHISPER_BACKEND", "local"),
+    )
     values = {
         "TELEGRAM_BOT_TOKEN": token,
         "ALLOWED_TELEGRAM_USER_IDS": user_ids,
         "DEFAULT_TELEGRAM_CHAT_ID": default_chat,
-        "WORKSPACE_ROOT": str(Path(workspace).expanduser().resolve()),
+        "WORKSPACE_ROOT": workspace,
         "DEFAULT_AGENT_COMMAND": agent_command,
         "DEFAULT_AGENT_ADAPTER": adapter,
         "AUTO_START_AGENT": auto_start,
-        "AGENT_OUTPUT_MODE": "final",
-        "SUPPRESS_AGENT_TRACE_LINES": "true",
-        "NOTIFICATION_BLOCK_FILE": str(Path(mute_file).expanduser()),
+        "AGENT_OUTPUT_MODE": existing_value(existing, "AGENT_OUTPUT_MODE", "final"),
+        "SUPPRESS_AGENT_TRACE_LINES": existing_value(existing, "SUPPRESS_AGENT_TRACE_LINES", "true"),
+        "AGENT_INITIAL_PROMPT_ENABLED": existing_value(existing, "AGENT_INITIAL_PROMPT_ENABLED", "true"),
+        "NOTIFICATION_BLOCK_FILE": mute_file,
         "WHISPER_BACKEND": backend,
-        "WHISPER_MODEL": prompt("Local Whisper model", default="small"),
-        "WHISPER_COMPUTE_TYPE": "int8",
-        "WHISPER_DEVICE": "cpu",
-        "WHISPER_MODEL_DIR": "",
-        "FFMPEG_BINARY": "ffmpeg",
+        "WHISPER_MODEL": prompt(
+            "Local Whisper model (base/small/turbo)",
+            default=existing_value(existing, "WHISPER_MODEL", "small"),
+        ),
+        "WHISPER_COMPUTE_TYPE": existing_value(existing, "WHISPER_COMPUTE_TYPE", "int8"),
+        "WHISPER_DEVICE": existing_value(existing, "WHISPER_DEVICE", "cpu"),
+        "WHISPER_MODEL_DIR": existing_value(existing, "WHISPER_MODEL_DIR", ""),
+        "FFMPEG_BINARY": existing_value(existing, "FFMPEG_BINARY", "ffmpeg"),
     }
 
     if backend == "whisper_cpp":
@@ -117,12 +154,18 @@ def init_config(
         )
         values["WHISPER_CPP_FFMPEG_BINARY"] = prompt("ffmpeg binary", default="ffmpeg")
     elif backend == "openai":
-        values["TRANSCRIPTION_OPENAI_API_KEY"] = prompt("OpenAI API key", secret=True)
+        values["TRANSCRIPTION_OPENAI_API_KEY"] = prompt(
+            "OpenAI API key",
+            default=existing_value(existing, "TRANSCRIPTION_OPENAI_API_KEY"),
+            secret=True,
+        )
         values["OPENAI_TRANSCRIPTION_MODEL"] = prompt(
             "OpenAI transcription model",
-            default="gpt-4o-mini-transcribe",
+            default=existing_value(existing, "OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe"),
         )
 
+    if existing and not force and not yes_no("Write updated config", default=True):
+        raise FileExistsError(f"config already exists: {config_path}")
     write_env_file(config_path, values)
     if backend == "whisper_cpp":
         binary = Path(values["WHISPER_CPP_BINARY"]).expanduser()
@@ -144,12 +187,13 @@ def default_config_values() -> dict[str, str]:
         "TELEGRAM_BOT_TOKEN": "replace-me",
         "ALLOWED_TELEGRAM_USER_IDS": "123456789",
         "DEFAULT_TELEGRAM_CHAT_ID": "",
-        "WORKSPACE_ROOT": str(Path.cwd().resolve()),
+        "WORKSPACE_ROOT": ".",
         "DEFAULT_AGENT_COMMAND": "codex",
         "DEFAULT_AGENT_ADAPTER": "codex",
         "AUTO_START_AGENT": "false",
         "AGENT_OUTPUT_MODE": "final",
         "SUPPRESS_AGENT_TRACE_LINES": "true",
+        "AGENT_INITIAL_PROMPT_ENABLED": "true",
         "NOTIFICATION_BLOCK_FILE": str(default_mute_file()),
         "WHISPER_BACKEND": "local",
         "WHISPER_MODEL": "small",
@@ -158,6 +202,44 @@ def default_config_values() -> dict[str, str]:
         "WHISPER_MODEL_DIR": "",
         "FFMPEG_BINARY": "ffmpeg",
     }
+
+
+def read_existing_config(config_path: Path) -> dict[str, str]:
+    values = dotenv_values(config_path)
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def existing_value(values: dict[str, str], key: str, default: str | None = None) -> str | None:
+    value = values.get(key)
+    if value is None:
+        return default
+    return value
+
+
+def default_mute_prompt_value(values: dict[str, str]) -> str:
+    current = existing_value(values, "NOTIFICATION_BLOCK_FILE")
+    legacy_global = str(default_state_dir() / "muted")
+    if current and current != legacy_global:
+        return current
+    return str(default_mute_file())
+
+
+def default_workspace_prompt_value(values: dict[str, str]) -> str:
+    current = existing_value(values, "WORKSPACE_ROOT")
+    if not current:
+        return "."
+
+    current = current.strip()
+    if current == ".":
+        return "."
+
+    try:
+        if Path(current).expanduser().resolve(strict=False) == Path.home().resolve(strict=False):
+            return "."
+    except OSError:
+        pass
+
+    return current
 
 
 def install_user_launcher(config_path: Path) -> Path:
