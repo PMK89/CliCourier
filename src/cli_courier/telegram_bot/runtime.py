@@ -7,7 +7,7 @@ from pathlib import Path
 from cli_courier.agent.adapters import get_adapter, list_adapters
 from cli_courier.agent.approval import ApprovalDecision, detect_pending_approval, interpret_approval_text
 from cli_courier.agent.chunking import chunk_text
-from cli_courier.agent.output_filter import prepare_agent_output
+from cli_courier.agent.output_filter import agent_output_in_progress, prepare_agent_output
 from cli_courier.agent.session import AgentSession
 from cli_courier.config import AgentOutputMode, Settings, TranscriptionBackend, WhisperBackend
 from cli_courier.filesystem import Sandbox, SandboxViolation
@@ -43,6 +43,7 @@ class TelegramBridgeBot:
         self.transcriber = transcriber
         self._flush_tasks: set[asyncio.Task[None]] = set()
         self._last_approval_signature: str | None = None
+        self._agent_context_sent = False
 
     def build_application(self):
         from telegram.ext import (
@@ -302,8 +303,7 @@ class TelegramBridgeBot:
         self.state.active_agent = session
         self.state.agent_chat_id = chat_id
         self._last_approval_signature = None
-        if self.settings.agent_initial_prompt_enabled and self.settings.agent_initial_prompt.strip():
-            await session.send_text(self._agent_initial_prompt())
+        self._agent_context_sent = False
         task = self._create_background_task(
             application,
             self._flush_agent_output(application.bot, chat_id, session),
@@ -512,7 +512,7 @@ class TelegramBridgeBot:
         agent = self.state.active_agent
         if agent is None or not agent.is_running:
             raise RuntimeError("Agent is not running. Use /start_agent first.")
-        await agent.send_text(text)
+        await agent.send_text(self._agent_user_text(text))
 
     async def _handle_approval(self, decision: ApprovalDecision, message) -> None:
         pending = self.state.pending_approval
@@ -540,7 +540,10 @@ class TelegramBridgeBot:
         while self.state.active_agent is session and session.is_running:
             try:
                 output = await asyncio.wait_for(session.output_queue.get(), timeout=interval)
-                pending_text += output
+                if session.replaces_output_snapshots:
+                    pending_text = output
+                else:
+                    pending_text += output
                 now = asyncio.get_running_loop().time()
                 first_output_at = first_output_at or now
                 last_output_at = now
@@ -552,8 +555,12 @@ class TelegramBridgeBot:
             if self.settings.agent_output_mode == AgentOutputMode.STREAM:
                 if len(pending_text) < self.settings.max_telegram_chunk_chars and not session.output_queue.empty():
                     continue
-                if not self._approval_pending():
-                    await self._send_agent_output(bot, chat_id, pending_text)
+                if not self._approval_pending() and not agent_output_in_progress(pending_text):
+                    stream_text = prepare_agent_output(
+                        pending_text,
+                        suppress_trace_lines=self.settings.suppress_agent_trace_lines,
+                    )
+                    await self._send_agent_output(bot, chat_id, stream_text)
                 pending_text = ""
                 first_output_at = None
                 last_output_at = None
@@ -565,6 +572,10 @@ class TelegramBridgeBot:
             idle = last_output_at is not None and loop_now - last_output_at >= idle_seconds
             waited = first_output_at is not None and loop_now - first_output_at >= max_wait_seconds
             if idle or waited:
+                if agent_output_in_progress(pending_text):
+                    if waited:
+                        first_output_at = loop_now
+                    continue
                 if not self._approval_pending():
                     final_text = prepare_agent_output(
                         pending_text,
@@ -653,6 +664,16 @@ class TelegramBridgeBot:
                 "control files, screenshots, voice approval, mute/unmute, and agent approvals.",
             )
         )
+
+    def _agent_user_text(self, text: str) -> str:
+        if (
+            self._agent_context_sent
+            or not self.settings.agent_initial_prompt_enabled
+            or not self.settings.agent_initial_prompt.strip()
+        ):
+            return text
+        self._agent_context_sent = True
+        return f"{self._agent_initial_prompt()}\n\nUser request:\n{text}"
 
     def _create_background_task(self, application, coroutine) -> asyncio.Task:
         if getattr(application, "running", False):

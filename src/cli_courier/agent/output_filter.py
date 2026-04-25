@@ -8,13 +8,25 @@ from cli_courier.security.terminal import sanitize_terminal_text
 TRACE_LINE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"^\s*(thinking|reasoning|working|planning|analyzing)\b\.?:?\s*$",
+        r"^\s*(thinking|reasoning|working|planning|analyzing)\b.*$",
+        r"^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+.*$",
         r"^\s*(tool call|tool_call|function call|calling tool|running tool)\b.*$",
         r"^\s*(executing|reading|searching|editing|applying patch|observing)\b.*$",
         r"^\s*(bash|shell|python|apply_patch|functions\.[a-z_]+|web\.[a-z_]+)\s*(\(|:|$).*$",
         r"^\s*(tokens|context window|model:|cwd:|sandbox:)\b.*$",
+        r"^\s*(?:gpt-|claude|gemini).*$",
+        r"^\s*.*\besc\s+to\s+interrupt\b.*$",
         r"^\s*›.*$",
         r"^\s*[-*]\s*(ran|read|opened|searched|updated|patched)\b.*$",
+    )
+)
+
+IN_PROGRESS_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bworking\s*\(",
+        r"\besc\s+to\s+interrupt\b",
+        r"^\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+",
     )
 )
 
@@ -30,6 +42,11 @@ def prepare_agent_output(text: str, *, suppress_trace_lines: bool = True) -> str
     filtered = [line for line in lines if not _looks_like_trace_line(line)]
     filtered = _trim_blank_edges(filtered)
     return "\n".join(filtered).strip()
+
+
+def agent_output_in_progress(text: str) -> bool:
+    cleaned = sanitize_terminal_text(text)
+    return any(pattern.search(cleaned) for pattern in IN_PROGRESS_PATTERNS)
 
 
 def _looks_like_trace_line(line: str) -> bool:

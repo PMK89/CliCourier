@@ -39,6 +39,7 @@ class AgentSession:
         self._buffer = OutputRingBuffer(recent_output_max_chars)
         env = build_agent_env(env_allowlist)
         backend = resolve_terminal_backend(terminal_backend)
+        self.replaces_output_snapshots = backend == "tmux"
         if backend == "tmux":
             self._process = TmuxAgentProcess(
                 command,

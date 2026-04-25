@@ -3,10 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from cli_courier.config import Settings
+from cli_courier.filesystem import Sandbox
+from cli_courier.screenshots import ScreenshotService
+from cli_courier.state import RuntimeState
 from cli_courier.telegram_bot.auth import TelegramIdentity, is_authorized
 from cli_courier.telegram_bot.commands import parse_command
 from cli_courier.telegram_bot.router import RouteKind, route_text
-from cli_courier.telegram_bot.runtime import approval_decision_from_reactions
+from cli_courier.telegram_bot.runtime import TelegramBridgeBot, approval_decision_from_reactions
+from cli_courier.voice import DisabledTranscriber
 
 
 def settings(root: Path, **overrides) -> Settings:
@@ -78,3 +82,25 @@ def test_reaction_approval_mapping() -> None:
     assert approval_decision_from_reactions([FakeReaction("👍")]) == "approve"
     assert approval_decision_from_reactions([FakeReaction("❤️")]) == "approve"
     assert approval_decision_from_reactions([FakeReaction("👎")]) == "reject"
+
+
+def test_initial_agent_context_is_prepended_once(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path)
+    bot = TelegramBridgeBot(
+        settings=app_settings,
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+
+    first = bot._agent_user_text("Do the task")
+    second = bot._agent_user_text("Next task")
+
+    assert "CliCourier workspace root" in first
+    assert "User request:\nDo the task" in first
+    assert second == "Next task"

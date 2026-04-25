@@ -5,8 +5,8 @@ from datetime import UTC, datetime
 from cli_courier.agent.adapters import CodexAdapter, GenericCliAdapter
 from cli_courier.agent.approval import detect_pending_approval, interpret_approval_text
 from cli_courier.agent.chunking import OutputRingBuffer, chunk_text
-from cli_courier.agent.output_filter import prepare_agent_output
-from cli_courier.agent.session import resolve_terminal_backend
+from cli_courier.agent.output_filter import agent_output_in_progress, prepare_agent_output
+from cli_courier.agent.session import AgentSession, resolve_terminal_backend
 from cli_courier.agent.tmux import safe_tmux_session_name
 
 
@@ -18,6 +18,18 @@ def test_adapter_builds_configured_command() -> None:
 def test_resolve_terminal_backend_accepts_explicit_modes() -> None:
     assert resolve_terminal_backend("pty") == "pty"
     assert resolve_terminal_backend("tmux") == "tmux"
+
+
+def test_agent_session_marks_tmux_output_as_replaceable(tmp_path) -> None:
+    session = AgentSession(
+        adapter=GenericCliAdapter(),
+        command=["sh"],
+        cwd=tmp_path,
+        recent_output_max_chars=1000,
+        terminal_backend="tmux",
+    )
+
+    assert session.replaces_output_snapshots is True
 
 
 def test_tmux_session_names_are_sanitized(tmp_path) -> None:
@@ -84,3 +96,16 @@ def test_prepare_agent_output_returns_empty_for_prompt_echo_only() -> None:
     )
 
     assert output == ""
+
+
+def test_prepare_agent_output_suppresses_working_status_lines() -> None:
+    output = prepare_agent_output(
+        "Working (14s • esc to interrupt)\n⠋ Reading files\nFinal answer\n",
+        suppress_trace_lines=True,
+    )
+
+    assert output == "Final answer"
+
+
+def test_agent_output_in_progress_detects_codex_working_status() -> None:
+    assert agent_output_in_progress("Working (14s • esc to interrupt)")
