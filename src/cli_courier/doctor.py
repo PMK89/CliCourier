@@ -78,6 +78,16 @@ def collect_checks(config_path: Path | None = None) -> list[Check]:
                 ),
                 _agent_command_check(settings.default_agent_command),
                 Check(
+                    "tmux",
+                    shutil.which("tmux") is not None or settings.agent_terminal_backend.value == "pty",
+                    shutil.which("tmux")
+                    or (
+                        "not required with AGENT_TERMINAL_BACKEND=pty"
+                        if settings.agent_terminal_backend.value == "pty"
+                        else "missing; install tmux or set AGENT_TERMINAL_BACKEND=pty"
+                    ),
+                ),
+                Check(
                     "ffmpeg",
                     shutil.which(settings.ffmpeg_binary) is not None,
                     shutil.which(settings.ffmpeg_binary) or f"missing: {settings.ffmpeg_binary}",
@@ -119,4 +129,3 @@ def _model_check(settings: Settings) -> Check:
     if status.cache_dir is not None:
         detail = f"{detail}: {status.cache_dir}"
     return Check("model cache", ok, detail)
-

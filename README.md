@@ -13,7 +13,7 @@ workstation where Telegram is the remote control surface, not the security bound
 - Telegram allowlist gate before every handler.
 - Configured CLI agent only; Telegram users cannot run arbitrary shell commands.
 - Codex CLI adapter plus a generic CLI adapter for testing and future agents.
-- PTY-backed agent session with output sanitization, chunking, and recent-output buffer.
+- Terminal-backed agent session with tmux preferred when available, plus PTY fallback.
 - Final-output Telegram delivery by default, with noisy tool/status lines suppressed.
 - Pending approval detection with explicit `/approve`, `/reject`, and nonce-backed buttons.
 - Workspace sandbox for `/ls`, `/tree`, `/cd`, `/cat`, and `/sendfile`.
@@ -98,6 +98,8 @@ WHISPER_DEVICE=cpu
 WHISPER_MODEL_DIR=
 FFMPEG_BINARY=ffmpeg
 AGENT_OUTPUT_MODE=final
+AGENT_TERMINAL_BACKEND=auto
+AGENT_TMUX_SESSION=clicourier
 NOTIFICATION_BLOCK_FILE=muted
 MAX_TELEGRAM_CHUNK_CHARS=3500
 ```
@@ -136,10 +138,20 @@ Telegram voice messages are OGG/Opus. CliCourier converts them to 16 kHz mono WA
 
 ## Run
 
-Foreground:
+Interactive run:
 
 ```bash
 clicourier run -- codex
+```
+
+`clicourier run` asks for `desktop` or `telegram` mode when launched from a terminal.
+Desktop mode creates the mute file, starts the bridge daemon in the background, and
+attaches to the agent's tmux terminal so the CLI stays visible and usable locally.
+Telegram mode removes the mute file, starts the same background bridge, and leaves the
+agent reachable from Telegram. You can attach later with:
+
+```bash
+tmux attach -t clicourier
 ```
 
 Background daemon:
@@ -168,8 +180,11 @@ clicourier mute
 clicourier unmute
 ```
 
-The same toggle is available from Telegram with `/mute`, `/unmute`, and `/mute_status`.
-By default this creates a `muted` file in the project working directory.
+The same toggle is available from Telegram with `/mute`, `/unmute`, `/desktop`,
+`/telegram`, and `/mute_status`. By default this creates a `muted` file in the project
+working directory. The initial agent prompt explains this to the coding agent, so you can
+ask it to "switch to desktop" or "switch to Telegram" and it can create or delete that
+file.
 
 ## Development
 

@@ -198,6 +198,8 @@ class TelegramBridgeBot:
             "voice_edit": self._cmd_voice_edit,
             "mute": self._cmd_mute,
             "unmute": self._cmd_unmute,
+            "desktop": self._cmd_mute,
+            "telegram": self._cmd_unmute,
             "mute_status": self._cmd_mute_status,
             "help": self._cmd_help,
             "start": self._cmd_help,
@@ -252,6 +254,9 @@ class TelegramBridgeBot:
             cwd=self.settings.workspace_root,
             recent_output_max_chars=self.settings.recent_output_max_chars,
             env_allowlist=self.settings.agent_env_allowlist,
+            terminal_backend=self.settings.agent_terminal_backend.value,
+            tmux_session_name=self.settings.agent_tmux_session,
+            tmux_history_lines=self.settings.agent_tmux_history_lines,
         )
         await session.start()
         self.state.active_agent = session
@@ -594,6 +599,11 @@ class TelegramBridgeBot:
             (
                 prompt,
                 f"CliCourier workspace root: {self.settings.workspace_root}.",
+                f"CliCourier notification block file: {self.settings.notification_block_file}.",
+                "Desktop mode means that block file exists and proactive Telegram output is muted; "
+                "Telegram mode means the file is deleted and proactive output resumes. If the user "
+                "asks you to switch to desktop/local mode, create the block file. If the user asks "
+                "you to switch to Telegram mode, delete the block file.",
                 "If the user asks about bridge behavior, mention that Telegram slash commands "
                 "control files, screenshots, voice approval, mute/unmute, and agent approvals.",
             )

@@ -39,6 +39,12 @@ class AgentOutputMode(str, Enum):
     STREAM = "stream"
 
 
+class AgentTerminalBackend(str, Enum):
+    AUTO = "auto"
+    PTY = "pty"
+    TMUX = "tmux"
+
+
 def _split_csv(value: Any) -> list[str]:
     if value is None:
         return []
@@ -113,6 +119,12 @@ class Settings(BaseSettings):
     )
     agent_env_allowlist: tuple[str, ...] = Field(default=(), alias="AGENT_ENV_ALLOWLIST")
     agent_output_mode: AgentOutputMode = Field(default=AgentOutputMode.FINAL, alias="AGENT_OUTPUT_MODE")
+    agent_terminal_backend: AgentTerminalBackend = Field(
+        default=AgentTerminalBackend.AUTO,
+        alias="AGENT_TERMINAL_BACKEND",
+    )
+    agent_tmux_session: str | None = Field(default=None, alias="AGENT_TMUX_SESSION")
+    agent_tmux_history_lines: int = Field(default=300, alias="AGENT_TMUX_HISTORY_LINES")
     suppress_agent_trace_lines: bool = Field(default=True, alias="SUPPRESS_AGENT_TRACE_LINES")
     agent_initial_prompt_enabled: bool = Field(default=True, alias="AGENT_INITIAL_PROMPT_ENABLED")
     agent_initial_prompt: str = Field(
@@ -218,6 +230,7 @@ class Settings(BaseSettings):
         "voice_max_bytes",
         "screenshot_max_bytes",
         "whisper_cpp_timeout_seconds",
+        "agent_tmux_history_lines",
     )
     @classmethod
     def validate_positive_limit(cls, value: int) -> int:

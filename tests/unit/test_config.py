@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from cli_courier.config import (
     AgentOutputMode,
+    AgentTerminalBackend,
     Settings,
     TranscriptionBackend,
     WhisperBackend,
@@ -38,6 +39,8 @@ def test_settings_parse_required_values(tmp_path: Path) -> None:
     assert settings.agent_command_parts == ["codex", "--ask-for-approval", "on-request"]
     assert settings.agent_env_allowlist == ("EDITOR", "GIT_AUTHOR_NAME")
     assert settings.agent_output_mode == AgentOutputMode.FINAL
+    assert settings.agent_terminal_backend == AgentTerminalBackend.AUTO
+    assert settings.agent_tmux_history_lines == 300
     assert settings.default_telegram_chat_id is None
     assert settings.whisper_backend == WhisperBackend.LOCAL
     assert settings.whisper_model == "small"

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import shlex
 import sys
+import time
 from pathlib import Path
 
 from cli_courier.app import main as run_app
@@ -66,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
         if agent:
             os.environ["DEFAULT_AGENT_COMMAND"] = shlex.join(agent)
             os.environ["AUTO_START_AGENT"] = "true"
+        if should_offer_run_mode(args):
+            return run_with_mode_prompt(config_path=config_path, agent_command=agent, mode=args.mode)
         run_app(config_path=config_path)
         return 0
     if command == "start":
@@ -151,6 +155,12 @@ def build_parser() -> argparse.ArgumentParser:
     model_subparsers.add_parser("list", help="List configured and known local models")
 
     run_parser = subparsers.add_parser("run", help="Run the bridge in the foreground")
+    run_parser.add_argument(
+        "--mode",
+        choices=("ask", "desktop", "local", "telegram", "foreground"),
+        default="ask",
+        help="desktop/local starts the bridge daemon and attaches tmux muted; telegram starts it unmuted",
+    )
     run_parser.add_argument("agent", nargs=argparse.REMAINDER, help="Optional CLI command to auto-start")
 
     start_parser = subparsers.add_parser("start", help="Start the bridge in the background")
@@ -193,6 +203,104 @@ def configured_mute_file(config_path: Path | None) -> Path:
         return default_mute_file()
 
 
+def should_offer_run_mode(args) -> bool:
+    if os.environ.get("CLICOURIER_DAEMON_CHILD") == "1":
+        return False
+    if args.mode == "foreground":
+        return False
+    if args.mode != "ask":
+        return True
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def run_with_mode_prompt(
+    *,
+    config_path: Path | None,
+    agent_command: list[str],
+    mode: str,
+) -> int:
+    settings = load_settings(config_path)
+    selected = normalize_run_mode(mode)
+    if selected == "ask":
+        selected = prompt_run_mode()
+
+    mute_file = settings.notification_block_file.expanduser()
+    if selected in {"desktop", "local"}:
+        set_mute_file(mute_file, muted=True)
+        print(f"desktop mode: Telegram proactive output muted via {mute_file}")
+    elif selected == "telegram":
+        set_mute_file(mute_file, muted=False)
+        print(f"telegram mode: proactive Telegram output enabled")
+    else:
+        run_app(config_path=config_path)
+        return 0
+
+    extra_env = {
+        "AGENT_TERMINAL_BACKEND": "tmux",
+        "AGENT_TMUX_SESSION": settings.agent_tmux_session or "clicourier",
+    }
+    status = start_daemon(
+        config_path=config_path,
+        agent_command=agent_command or None,
+        extra_env=extra_env,
+    )
+    if not status.running:
+        print("failed to start clicourier", file=sys.stderr)
+        return 1
+    print(f"clicourier bridge running with pid {status.pid}")
+    print(f"log: {status.log_path}")
+
+    if selected in {"desktop", "local"}:
+        session_name = extra_env["AGENT_TMUX_SESSION"]
+        if wait_for_tmux_session(session_name):
+            print(f"attaching to agent terminal: tmux attach -t {session_name}")
+            return subprocess.run(["tmux", "attach", "-t", session_name], check=False).returncode
+        print(f"bridge started, but tmux session is not ready yet: {session_name}", file=sys.stderr)
+        print(f"attach later with: tmux attach -t {session_name}")
+        return 1
+
+    print("agent is running in tmux; attach with:")
+    print(f"tmux attach -t {extra_env['AGENT_TMUX_SESSION']}")
+    return 0
+
+
+def normalize_run_mode(mode: str) -> str:
+    return "desktop" if mode == "local" else mode
+
+
+def prompt_run_mode() -> str:
+    while True:
+        value = input("Run mode: desktop/local or telegram [desktop]: ").strip().lower()
+        if not value:
+            return "desktop"
+        if value in {"desktop", "local", "telegram", "foreground"}:
+            return normalize_run_mode(value)
+        print("Choose desktop, local, telegram, or foreground.")
+
+
+def set_mute_file(path: Path, *, muted: bool) -> None:
+    if muted:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("muted\n", encoding="utf-8")
+    else:
+        path.unlink(missing_ok=True)
+
+
+def wait_for_tmux_session(session_name: str, *, timeout_seconds: float = 12.0) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", session_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def print_config(config_path: Path | None) -> int:
     path = config_path or default_config_path()
     print(f"path: {path}")
@@ -207,6 +315,8 @@ def print_config(config_path: Path | None) -> int:
     print("allowed_users: " + ",".join(str(user_id) for user_id in settings.allowed_telegram_user_ids))
     print(f"workspace_root: {settings.workspace_root}")
     print(f"default_agent_command: {settings.default_agent_command}")
+    print(f"agent_terminal_backend: {settings.agent_terminal_backend.value}")
+    print(f"agent_tmux_session: {settings.agent_tmux_session or 'clicourier'}")
     print(f"whisper_backend: {settings.whisper_backend.value}")
     print(f"whisper_model: {settings.whisper_model}")
     return 0

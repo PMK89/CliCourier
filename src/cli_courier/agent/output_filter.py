@@ -13,6 +13,7 @@ TRACE_LINE_PATTERNS = tuple(
         r"^\s*(executing|reading|searching|editing|applying patch|observing)\b.*$",
         r"^\s*(bash|shell|python|apply_patch|functions\.[a-z_]+|web\.[a-z_]+)\s*(\(|:|$).*$",
         r"^\s*(tokens|context window|model:|cwd:|sandbox:)\b.*$",
+        r"^\s*›.*\b(?:gpt-|claude|gemini|~/|/).*$",
         r"^\s*[-*]\s*(ran|read|opened|searched|updated|patched)\b.*$",
     )
 )
@@ -57,4 +58,3 @@ def _remove_terminal_rewrite_noise(text: str) -> str:
             continue
         lines.append(line)
     return "\n".join(lines)
-

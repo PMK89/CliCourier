@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 
 from cli_courier.agent.adapters import AgentAdapter
 from cli_courier.agent.chunking import OutputRingBuffer
 from cli_courier.agent.pty import PtyAgentProcess, build_agent_env
+from cli_courier.agent.tmux import TmuxAgentProcess
 
 
 @dataclass(frozen=True)
@@ -26,17 +28,31 @@ class AgentSession:
         cwd: Path,
         recent_output_max_chars: int,
         env_allowlist: tuple[str, ...] = (),
+        terminal_backend: str = "auto",
+        tmux_session_name: str | None = None,
+        tmux_history_lines: int = 300,
     ) -> None:
         self.adapter = adapter
         self.command = command
         self.cwd = cwd
         self.output_queue: asyncio.Queue[str] = asyncio.Queue()
         self._buffer = OutputRingBuffer(recent_output_max_chars)
-        self._process = PtyAgentProcess(
-            command,
-            cwd=cwd,
-            env=build_agent_env(env_allowlist),
-        )
+        env = build_agent_env(env_allowlist)
+        backend = resolve_terminal_backend(terminal_backend)
+        if backend == "tmux":
+            self._process = TmuxAgentProcess(
+                command,
+                cwd=cwd,
+                env=env,
+                session_name=tmux_session_name,
+                history_lines=tmux_history_lines,
+            )
+        else:
+            self._process = PtyAgentProcess(
+                command,
+                cwd=cwd,
+                env=env,
+            )
         self._consumer_task: asyncio.Task[None] | None = None
 
     @property
@@ -81,3 +97,11 @@ class AgentSession:
             normalized = self.adapter.normalize_output(raw)
             self._buffer.append(normalized)
             await self.output_queue.put(normalized)
+
+
+def resolve_terminal_backend(value: str) -> str:
+    if value == "auto":
+        return "tmux" if shutil.which("tmux") else "pty"
+    if value in {"pty", "tmux"}:
+        return value
+    raise ValueError(f"unknown agent terminal backend: {value}")

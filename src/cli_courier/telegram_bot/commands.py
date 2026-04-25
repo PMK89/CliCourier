@@ -24,6 +24,8 @@ COMMAND_HELP = """CliCourier commands
 /voice_edit <text> - replace the pending transcript
 /mute - suppress proactive agent output
 /unmute - resume proactive agent output
+/desktop - same as /mute
+/telegram - same as /unmute
 /mute_status - show notification mute state
 /help - show this command list
 """

@@ -62,6 +62,7 @@ def start_daemon(
     *,
     config_path: Path | None = None,
     agent_command: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
     pid_path: Path = default_pid_path(),
     log_path: Path = default_log_path(),
 ) -> DaemonStatus:
@@ -73,6 +74,7 @@ def start_daemon(
     ensure_private_parent(log_path)
     env = os.environ.copy()
     env["AUTO_START_AGENT"] = "true"
+    env["CLICOURIER_DAEMON_CHILD"] = "1"
     src_path = Path(__file__).resolve().parents[1]
     current_pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = (
@@ -87,10 +89,13 @@ def start_daemon(
         env["DEFAULT_AGENT_ADAPTER"] = (
             "codex" if Path(agent_command[0]).name == "codex" else "generic"
         )
+    if extra_env:
+        env.update(extra_env)
 
-    command = [sys.executable, "-m", "cli_courier.cli", "run"]
+    command = [sys.executable, "-m", "cli_courier.cli"]
     if config_path is not None:
         command.extend(["--config", str(config_path.expanduser())])
+    command.append("run")
 
     with log_path.open("ab", buffering=0) as log_file:
         process = subprocess.Popen(

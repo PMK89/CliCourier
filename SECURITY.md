@@ -34,15 +34,15 @@ Agent output is displayed to Telegram but never interpreted as a bot command. Ap
 detection only creates pending approval state; it does not approve automatically. The user
 must approve or reject through a command or a nonce-backed inline button.
 
-`AGENT_OUTPUT_MODE=final` avoids streaming raw intermediate PTY output and suppresses
+`AGENT_OUTPUT_MODE=final` avoids streaming raw intermediate terminal output and suppresses
 common reasoning/tool/status trace lines before Telegram delivery. This is a best-effort
 filter because every CLI formats output differently.
 
 ### Command Injection
 
-`DEFAULT_AGENT_COMMAND` is parsed once with `shlex` and executed without a shell. Telegram
-messages are not appended to shell commands. Filesystem commands use Python path APIs, not
-shell commands.
+`DEFAULT_AGENT_COMMAND` is parsed once with `shlex` and is never built from Telegram text.
+Telegram messages are sent as input to the already-running configured agent. Filesystem
+commands use Python path APIs, not shell commands.
 
 ### Bridge Secrets In Agent Environment
 
@@ -60,7 +60,9 @@ local executables/data; install those only from sources you trust.
 ### Local Mute Toggle
 
 Anyone who can create `NOTIFICATION_BLOCK_FILE` can suppress proactive Telegram output.
-The default file is `muted` in the project working directory.
+The default file is `muted` in the project working directory. The initial agent prompt
+explains that creating this file switches to desktop/local mode and deleting it switches to
+Telegram mode.
 
 ## Hardening Notes
 

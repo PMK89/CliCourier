@@ -6,6 +6,7 @@ import pytest
 
 import clicourier.cli
 from cli_courier.cli import normalize_remainder
+from cli_courier.cli import normalize_run_mode, set_mute_file
 from cli_courier.doctor import collect_checks
 from cli_courier.local_config import default_state_dir
 from cli_courier.setup import (
@@ -18,6 +19,20 @@ from cli_courier.setup import (
 
 def test_normalize_remainder_strips_double_dash() -> None:
     assert normalize_remainder(["--", "codex", "--model", "x"]) == ["codex", "--model", "x"]
+
+
+def test_normalize_run_mode_maps_local_to_desktop() -> None:
+    assert normalize_run_mode("local") == "desktop"
+    assert normalize_run_mode("telegram") == "telegram"
+
+
+def test_set_mute_file_toggles_file(tmp_path: Path) -> None:
+    path = tmp_path / "muted"
+    set_mute_file(path, muted=True)
+    assert path.exists()
+
+    set_mute_file(path, muted=False)
+    assert not path.exists()
 
 
 def test_infer_adapter_uses_codex_only_for_codex_command() -> None:

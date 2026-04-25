@@ -6,11 +6,22 @@ from cli_courier.agent.adapters import CodexAdapter, GenericCliAdapter
 from cli_courier.agent.approval import detect_pending_approval, interpret_approval_text
 from cli_courier.agent.chunking import OutputRingBuffer, chunk_text
 from cli_courier.agent.output_filter import prepare_agent_output
+from cli_courier.agent.session import resolve_terminal_backend
+from cli_courier.agent.tmux import safe_tmux_session_name
 
 
 def test_adapter_builds_configured_command() -> None:
     command = CodexAdapter().build_command("codex --model gpt-5")
     assert command == ["codex", "--model", "gpt-5"]
+
+
+def test_resolve_terminal_backend_accepts_explicit_modes() -> None:
+    assert resolve_terminal_backend("pty") == "pty"
+    assert resolve_terminal_backend("tmux") == "tmux"
+
+
+def test_tmux_session_names_are_sanitized(tmp_path) -> None:
+    assert safe_tmux_session_name("Cli Courier:/repo", workspace=tmp_path) == "Cli-Courier-repo"
 
 
 def test_detect_pending_approval_from_recent_output() -> None:
@@ -45,6 +56,15 @@ def test_chunk_text_prefers_newline_boundaries() -> None:
 def test_prepare_agent_output_suppresses_trace_lines() -> None:
     output = prepare_agent_output(
         "thinking\nrunning tool: shell\nFinal answer\n",
+        suppress_trace_lines=True,
+    )
+
+    assert output == "Final answer"
+
+
+def test_prepare_agent_output_suppresses_codex_prompt_echo() -> None:
+    output = prepare_agent_output(
+        "›Pleaseopenawebsitewithplaywright  gpt-5.5 xhigh · ~/CliCourier\nFinal answer\n",
         suppress_trace_lines=True,
     )
 

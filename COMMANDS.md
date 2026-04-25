@@ -15,6 +15,8 @@ active agent, except approval-like words when no approval is pending.
 | `/agents` | List available adapter ids. |
 | `/mute` | Suppress proactive agent output. |
 | `/unmute` | Resume proactive agent output. |
+| `/desktop` | Same as `/mute`; use this when you are working locally. |
+| `/telegram` | Same as `/unmute`; use this when you want proactive Telegram output. |
 | `/mute_status` | Show whether proactive output is muted. |
 | `/help` | Show command help. |
 
@@ -63,7 +65,7 @@ to the agent without confirmation.
 | `clicourier config` | Print config path and a redacted non-secret summary. |
 | `clicourier model download` | Download/load the configured faster-whisper model. |
 | `clicourier model list` | Show configured model, backend, cache status, and known model names. |
-| `clicourier run -- <tool>` | Run the bridge in the foreground and auto-start the CLI tool. |
+| `clicourier run -- <tool>` | Ask for desktop/telegram mode, start the bridge daemon, and auto-start the CLI tool. |
 | `clicourier start -- <tool>` | Run the bridge in the background and auto-start the CLI tool. |
 | `clicourier stop` | Stop the background bridge. |
 | `clicourier restart -- <tool>` | Restart the background bridge. |

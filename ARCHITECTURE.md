@@ -9,8 +9,9 @@ Telegram bot.
 2. `TelegramBridgeBot` registers one Telegram update dispatcher and one callback dispatcher.
 3. Every update passes through allowlist and chat-type authorization.
 4. Slash commands are handled by the bridge. Non-command text is routed to the active agent.
-5. `/start_agent` creates an `AgentSession`, which wraps a configured `PtyAgentProcess`.
-6. PTY output is sanitized, stored in a ring buffer, debounced, filtered, chunked, and
+5. `/start_agent` creates an `AgentSession`, which wraps tmux when available or falls back
+   to a configured `PtyAgentProcess`.
+6. Terminal output is sanitized, stored in a ring buffer, debounced, filtered, chunked, and
    flushed to Telegram as final output by default.
 7. Recent output is scanned for adapter-specific approval prompts.
 
@@ -27,7 +28,7 @@ src/cli_courier/
   doctor.py              local dependency and config diagnostics
   state.py               one-session runtime state
   telegram_bot/          auth, command parsing, routing, Telegram runtime
-  agent/                 adapters, PTY process, sessions, approval detection
+  agent/                 adapters, tmux/PTY processes, sessions, approval detection
   filesystem/            workspace sandbox and safe file operations
   screenshots/           newest screenshot artifact lookup
   voice/                 transcriber protocol, faster-whisper, whisper.cpp, and OpenAI backends
@@ -54,7 +55,12 @@ only supply command defaults, prompt patterns, and approval inputs.
 
 ## Process Model
 
-`PtyAgentProcess` uses `pexpect.spawn` with:
+`AGENT_TERMINAL_BACKEND=auto` prefers tmux when available. Tmux is the recommended backend
+for TUI agents because the same terminal can be attached locally while the Telegram bridge
+runs in the background. Telegram input is delivered with `tmux send-keys`, and output is
+captured from the pane.
+
+The PTY fallback uses `pexpect.spawn` with:
 
 - no shell interpolation;
 - fixed terminal dimensions;
@@ -75,7 +81,7 @@ The bot's file-command cwd is independent from the agent process cwd.
 
 ## Output Model
 
-`AGENT_OUTPUT_MODE=final` is the default. The bridge buffers PTY output and sends it after
+`AGENT_OUTPUT_MODE=final` is the default. The bridge buffers terminal output and sends it after
 `FINAL_OUTPUT_IDLE_MS` of quiet time or `FINAL_OUTPUT_MAX_WAIT_MS`, whichever comes first.
 This avoids streaming intermediate reasoning and tool traces. A generic filter removes
 common status/tool lines before delivery. Since CLI tools differ, this is best-effort; use
@@ -90,6 +96,11 @@ available.
 writes a PID file under `~/.local/state/clicourier`, and logs stdout/stderr there. The
 daemon sets `AUTO_START_AGENT=true`, so the configured or supplied CLI command starts when
 Telegram polling begins.
+
+`clicourier run` is an interactive convenience wrapper. In desktop mode it creates the
+mute file, starts the bridge daemon with a tmux-backed agent, and attaches to the tmux
+session. In Telegram mode it removes the mute file and starts the same background daemon
+without attaching.
 
 `NOTIFICATION_BLOCK_FILE` is a simple mute toggle. The generated default is `muted`, placed
 in the project working directory. When the file exists, proactive agent output and approval
