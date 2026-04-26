@@ -36,7 +36,7 @@ class TmuxAgentProcess:
         session_name: str | None = None,
         history_lines: int = 300,
         poll_interval_seconds: float = 0.5,
-        submit_delay_seconds: float = 0.35,
+        submit_delay_seconds: float = 0.05,
     ) -> None:
         if not command:
             raise ValueError("command must not be empty")
@@ -91,6 +91,17 @@ class TmuxAgentProcess:
             raise RuntimeError("agent process is not running")
         await asyncio.to_thread(self._send_text_with_submit, text, submit_sequence)
 
+    async def send_key(self, key: str) -> None:
+        if not self.is_running:
+            raise RuntimeError("agent process is not running")
+        if key not in {"Enter", "Up", "Down"}:
+            raise ValueError(f"unsupported key: {key}")
+        await asyncio.to_thread(
+            subprocess.run,
+            ["tmux", "send-keys", "-t", self.target, key],
+            check=True,
+        )
+
     def _new_session(self) -> None:
         subprocess.run(
             [
@@ -117,7 +128,11 @@ class TmuxAgentProcess:
         normalized = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").splitlines())
         if normalized:
             subprocess.run(
-                ["tmux", "send-keys", "-t", self.target, "-l", normalized],
+                ["tmux", "set-buffer", normalized],
+                check=True,
+            )
+            subprocess.run(
+                ["tmux", "paste-buffer", "-d", "-p", "-t", self.target],
                 check=True,
             )
             if self.submit_delay_seconds > 0:

@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from cli_courier.daemon import DaemonStatus
 import clicourier.cli
 from cli_courier.cli import normalize_remainder
-from cli_courier.cli import normalize_run_mode, set_mute_file
+from cli_courier.cli import normalize_run_mode, run_with_mode_prompt, set_mute_file
 from cli_courier.doctor import collect_checks
 from cli_courier.local_config import default_state_dir
 from cli_courier.setup import (
@@ -33,6 +34,74 @@ def test_set_mute_file_toggles_file(tmp_path: Path) -> None:
 
     set_mute_file(path, muted=False)
     assert not path.exists()
+
+
+def test_telegram_run_mode_attaches_visible_tmux_agent(tmp_path: Path, monkeypatch) -> None:
+    calls = {}
+
+    class FakeSettings:
+        notification_block_file = tmp_path / "muted"
+        agent_tmux_session = "clicourier-test"
+        default_agent_command = "codex"
+
+    monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
+    monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
+
+    def fake_start_daemon(**kwargs):
+        calls["start"] = kwargs
+        return DaemonStatus(True, 123, tmp_path / "pid", tmp_path / "log")
+
+    def fake_run(command, *, check=False):
+        calls["run"] = command
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr("cli_courier.cli.start_daemon", fake_start_daemon)
+    monkeypatch.setattr("cli_courier.cli.subprocess.run", fake_run)
+
+    result = run_with_mode_prompt(
+        config_path=None,
+        agent_command=["codex"],
+        mode="telegram",
+    )
+
+    assert result == 0
+    assert calls["start"]["auto_start_agent"] is True
+    assert calls["start"]["extra_env"]["AGENT_TERMINAL_BACKEND"] == "tmux"
+    assert calls["run"] == ["tmux", "attach", "-t", "clicourier-test"]
+    assert not FakeSettings.notification_block_file.exists()
+
+
+def test_telegram_run_mode_without_agent_starts_bridge_only(tmp_path: Path, monkeypatch) -> None:
+    calls = {}
+
+    class FakeSettings:
+        notification_block_file = tmp_path / "muted"
+        agent_tmux_session = "clicourier-test"
+        default_agent_command = "codex"
+
+    monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
+    monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: False)
+    monkeypatch.setattr("cli_courier.cli.subprocess.run", lambda *args, **kwargs: None)
+
+    def fake_start_daemon(**kwargs):
+        calls["start"] = kwargs
+        return DaemonStatus(True, 123, tmp_path / "pid", tmp_path / "log")
+
+    monkeypatch.setattr("cli_courier.cli.start_daemon", fake_start_daemon)
+
+    result = run_with_mode_prompt(
+        config_path=None,
+        agent_command=[],
+        mode="telegram",
+    )
+
+    assert result == 0
+    assert calls["start"]["auto_start_agent"] is True
+    assert not FakeSettings.notification_block_file.exists()
 
 
 def test_infer_adapter_uses_codex_only_for_codex_command() -> None:

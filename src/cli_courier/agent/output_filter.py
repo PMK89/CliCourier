@@ -14,12 +14,24 @@ TRACE_LINE_PATTERNS = tuple(
         r"^\s*(executing|reading|searching|editing|applying patch|observing)\b.*$",
         r"^\s*(bash|shell|python|apply_patch|functions\.[a-z_]+|web\.[a-z_]+)\s*(\(|:|$).*$",
         r"^\s*(tokens|context window|model:|cwd:|sandbox:)\b.*$",
+        r"^\s*(directory|tip):.*$",
+        r"^\s*│\s*(model:|directory:).*$",
         r"^\s*(?:gpt-|claude|gemini).*$",
+        r"^\s*.*\bOpenAI Codex\b.*$",
+        r"^\s*.*\[features\]\..*deprecated.*$",
+        r"^\s*⚠.*$",
+        r"^\s*[╭╮╰╯│─_> ]{4,}$",
+        r"^\s*\[Pasted Content \d+ chars\]\s*$",
         r"^\s*.*\besc\s+to\s+interrupt\b.*$",
-        r"^\s*›.*$",
         r"^\s*[-*]\s*(ran|read|opened|searched|updated|patched)\b.*$",
     )
 )
+
+CODEX_PROMPT_ECHO_RE = re.compile(
+    r"^\s*›(?:\S.*(?:\bgpt-[\w.-]+|\bclaude\b|\bgemini\b|·\s*~)|\S{20,}.*)$",
+    re.IGNORECASE,
+)
+CODEX_LEADING_MARKER_RE = re.compile(r"^\s*›\s+")
 
 IN_PROGRESS_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
@@ -35,6 +47,7 @@ def prepare_agent_output(text: str, *, suppress_trace_lines: bool = True) -> str
     cleaned = sanitize_terminal_text(text)
     cleaned = _remove_terminal_rewrite_noise(cleaned)
     lines = [line.rstrip() for line in cleaned.splitlines()]
+    lines = [_normalize_codex_output_line(line) for line in lines]
     lines = _trim_blank_edges(lines)
     if not suppress_trace_lines:
         return "\n".join(lines).strip()
@@ -46,14 +59,24 @@ def prepare_agent_output(text: str, *, suppress_trace_lines: bool = True) -> str
 
 def agent_output_in_progress(text: str) -> bool:
     cleaned = sanitize_terminal_text(text)
-    return any(pattern.search(cleaned) for pattern in IN_PROGRESS_PATTERNS)
+    lines = [line for line in cleaned.splitlines() if line.strip()]
+    tail = lines[-1] if lines else cleaned
+    return any(pattern.search(tail) for pattern in IN_PROGRESS_PATTERNS)
 
 
 def _looks_like_trace_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return False
+    if CODEX_PROMPT_ECHO_RE.match(stripped):
+        return True
     return any(pattern.match(stripped) for pattern in TRACE_LINE_PATTERNS)
+
+
+def _normalize_codex_output_line(line: str) -> str:
+    if CODEX_PROMPT_ECHO_RE.match(line.strip()):
+        return line
+    return CODEX_LEADING_MARKER_RE.sub("", line, count=1)
 
 
 def _trim_blank_edges(lines: list[str]) -> list[str]:

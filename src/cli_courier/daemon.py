@@ -63,6 +63,7 @@ def start_daemon(
     config_path: Path | None = None,
     agent_command: list[str] | None = None,
     extra_env: dict[str, str] | None = None,
+    auto_start_agent: bool = True,
     pid_path: Path = default_pid_path(),
     log_path: Path = default_log_path(),
 ) -> DaemonStatus:
@@ -73,7 +74,7 @@ def start_daemon(
     ensure_private_parent(pid_path)
     ensure_private_parent(log_path)
     env = os.environ.copy()
-    env["AUTO_START_AGENT"] = "true"
+    env["AUTO_START_AGENT"] = "true" if auto_start_agent else "false"
     env["CLICOURIER_DAEMON_CHILD"] = "1"
     src_path = Path(__file__).resolve().parents[1]
     current_pythonpath = env.get("PYTHONPATH")

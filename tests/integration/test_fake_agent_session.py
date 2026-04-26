@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from cli_courier.agent.adapters import GenericCliAdapter
+from cli_courier.agent.events import AgentEventKind
 from cli_courier.agent.session import AgentSession
 
 
@@ -18,10 +19,11 @@ async def test_agent_session_round_trip(tmp_path: Path) -> None:
     )
     await session.start()
     try:
-        await asyncio.wait_for(session.output_queue.get(), timeout=2)
+        ready = await asyncio.wait_for(session.output_queue.get(), timeout=2)
+        assert ready.kind == AgentEventKind.ASSISTANT_DELTA
         await session.send_text("hello")
         output = await asyncio.wait_for(session.output_queue.get(), timeout=2)
-        assert "echo: hello" in output
+        assert output.kind == AgentEventKind.ASSISTANT_DELTA
+        assert "echo: hello" in output.text
     finally:
         await session.stop()
-

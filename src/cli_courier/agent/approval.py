@@ -39,6 +39,10 @@ _APPROVE_EMOJI = {"👍", "❤", "♥"}
 _REJECT_EMOJI = {"👎"}
 _WORD_RE = re.compile(r"^[\s.!?,;:]+|[\s.!?,;:]+$")
 _SKIN_TONE_RE = re.compile("[\U0001f3fb-\U0001f3ff]")
+AUTO_APPROVAL_RE = re.compile(
+    r"(?:automatic approval review approved|auto-reviewer approved|auto[- ]approved)",
+    re.IGNORECASE,
+)
 
 
 def normalize_decision_text(text: str) -> str:
@@ -64,6 +68,10 @@ def is_approval_like(text: str) -> bool:
     return interpret_approval_text(text) is not None
 
 
+def has_auto_approval_marker(text: str) -> bool:
+    return AUTO_APPROVAL_RE.search(sanitize_terminal_text(text)) is not None
+
+
 def detect_pending_approval(
     recent_output: str,
     adapter: AgentAdapter,
@@ -81,6 +89,8 @@ def detect_pending_approval(
         match = pattern.search(tail)
         if match is None:
             continue
+        if AUTO_APPROVAL_RE.search(tail[match.start() :]):
+            return None
         detected_at = now or datetime.now(UTC)
         return PendingApproval(
             prompt_excerpt=safe_excerpt(tail[max(0, match.start() - 500) :], 900),

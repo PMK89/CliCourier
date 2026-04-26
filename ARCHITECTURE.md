@@ -9,11 +9,13 @@ Telegram bot.
 2. `TelegramBridgeBot` registers one Telegram update dispatcher and one callback dispatcher.
 3. Every update passes through allowlist and chat-type authorization.
 4. Slash commands are handled by the bridge. Non-command text is routed to the active agent.
-5. `/start_agent` creates an `AgentSession`, which wraps tmux when available or falls back
-   to a configured `PtyAgentProcess`.
-6. Terminal output is sanitized, stored in a ring buffer, debounced, filtered, chunked, and
-   flushed to Telegram as final output by default.
-7. Recent output is scanned for adapter-specific approval prompts.
+5. `/start_agent` creates an `AgentSession`. Codex uses structured `codex exec --json`
+   turns by default; explicit tmux/PTY configuration uses terminal fallback.
+6. Agent adapters emit normalized `AgentEvent` objects. Telegram consumes events, updates
+   one dashboard message, and sends separate important messages for final answers,
+   approvals, errors, screenshots, and artifacts.
+7. Inline buttons are backed by `PendingAction` ids. Arbitrary output is not parsed into
+   choices.
 
 ## Package Layout
 
@@ -28,7 +30,7 @@ src/cli_courier/
   doctor.py              local dependency and config diagnostics
   state.py               one-session runtime state
   telegram_bot/          auth, command parsing, routing, Telegram runtime
-  agent/                 adapters, tmux/PTY processes, sessions, approval detection
+  agent/                 adapters, event schema, Codex JSONL parser, tmux/PTY fallback
   filesystem/            workspace sandbox and safe file operations
   screenshots/           newest screenshot artifact lookup
   voice/                 transcriber protocol, faster-whisper, whisper.cpp, and OpenAI backends
@@ -41,24 +43,34 @@ Adapters define:
 
 - stable id and display name;
 - default command;
-- approval prompt regexes;
+- capability flags for structured streaming, resume, partial final output, approval
+  events, file events, and PTY requirements;
+- fallback approval prompt regexes;
 - approve and reject input strings;
 - output normalization.
 
 The MVP ships:
 
-- `codex`: tuned for Codex CLI approval prompts;
+- `codex`: structured JSONL by default, terminal fallback when forced;
+- `claude`: terminal fallback adapter prepared for future stream-json support;
+- `gemini`: terminal fallback adapter prepared for future stream-json support;
 - `generic`: conservative fallback and test adapter.
 
 Adding Claude or Gemini should not change Telegram command handling. A new adapter should
-only supply command defaults, prompt patterns, and approval inputs.
+only supply command defaults, capabilities, structured stream parsing when available, and
+approval inputs.
 
 ## Process Model
 
-`AGENT_TERMINAL_BACKEND=auto` prefers tmux when available. Tmux is the recommended backend
-for TUI agents because the same terminal can be attached locally while the Telegram bridge
-runs in the background. Telegram input is delivered with `tmux send-keys`, and output is
-captured from the pane.
+`AGENT_TERMINAL_BACKEND=auto` uses structured Codex mode when the adapter supports it.
+For Codex this means each Telegram prompt starts `codex exec --json <prompt>`; later turns
+use `codex exec resume --last --json <prompt>`. JSONL is parsed line by line and mapped to
+`AgentEvent` values such as `final_message`, `tool_started`, `approval_requested`, and
+`status`.
+
+Tmux is still the recommended fallback for TUI agents because the same terminal can be
+attached locally while the Telegram bridge runs in the background. Telegram input is
+delivered with `tmux send-keys`, and output is captured from the pane.
 
 The PTY fallback uses `pexpect.spawn` with:
 
@@ -79,16 +91,28 @@ must remain under `WORKSPACE_ROOT`, which blocks path traversal and symlink esca
 
 The bot's file-command cwd is independent from the agent process cwd.
 
-## Output Model
+## Event And Output Model
 
-`AGENT_OUTPUT_MODE=final` is the default. The bridge buffers terminal output and sends it after
-`FINAL_OUTPUT_IDLE_MS` of quiet time or `FINAL_OUTPUT_MAX_WAIT_MS`, whichever comes first.
-This avoids streaming intermediate reasoning and tool traces. A generic filter removes
-common status/tool lines before delivery. Since CLI tools differ, this is best-effort; use
-the generic adapter for unknown tools and tune command output in the tool itself when
-available.
+`AgentEvent` is the internal contract between adapters and Telegram. Structured adapters
+map native events directly. Terminal fallback maps raw output to `assistant_delta` and
+uses the old debounce/filter path only as a fallback.
+
+`AGENT_OUTPUT_MODE=final` is the default for terminal fallback. The bridge buffers output
+and sends it after `FINAL_OUTPUT_IDLE_MS` of quiet time or `FINAL_OUTPUT_MAX_WAIT_MS`,
+whichever comes first. Structured Codex final answers are sent from `final_message`
+events, while reasoning/tool/status events are treated as progress/debug data and are not
+shown as raw Telegram messages unless `/trace_on` is enabled.
 
 `AGENT_OUTPUT_MODE=stream` restores chunked streaming behavior.
+
+Telegram maintains one editable dashboard/status message per active session. It shows the
+agent, state, cwd, current tool or phase, last important event, and a short output tail.
+Updates are throttled to avoid flooding the chat and rendered under Telegram's message
+limit.
+
+Approvals and voice transcripts are represented as `PendingAction` records. Button
+callbacks use `cc:<action-id>:<choice-id>`, stale callbacks are rejected, and `yes`/`no`
+text only routes to approval handling when a matching pending approval exists.
 
 ## Background Model
 

@@ -159,7 +159,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=("ask", "desktop", "local", "telegram", "foreground"),
         default="ask",
-        help="desktop/local starts the bridge daemon and attaches tmux muted; telegram starts it unmuted",
+        help=(
+            "desktop/local attaches tmux with Telegram muted; telegram attaches tmux "
+            "unmuted, or starts bridge-only forwarding when no agent command is given"
+        ),
     )
     run_parser.add_argument("agent", nargs=argparse.REMAINDER, help="Optional CLI command to auto-start")
 
@@ -230,7 +233,7 @@ def run_with_mode_prompt(
         print(f"desktop mode: Telegram proactive output muted via {mute_file}")
     elif selected == "telegram":
         set_mute_file(mute_file, muted=False)
-        print(f"telegram mode: proactive Telegram output enabled")
+        print("telegram mode: proactive Telegram output enabled")
     else:
         run_app(config_path=config_path)
         return 0
@@ -239,10 +242,14 @@ def run_with_mode_prompt(
         "AGENT_TERMINAL_BACKEND": "tmux",
         "AGENT_TMUX_SESSION": settings.agent_tmux_session or "clicourier",
     }
+    default_agent_command = getattr(settings, "default_agent_command", "").strip()
+    should_start_agent = bool(agent_command) or bool(default_agent_command)
+    should_attach_terminal = bool(agent_command)
     status = start_daemon(
         config_path=config_path,
         agent_command=agent_command or None,
         extra_env=extra_env,
+        auto_start_agent=should_start_agent,
     )
     if not status.running:
         print("failed to start clicourier", file=sys.stderr)
@@ -250,7 +257,12 @@ def run_with_mode_prompt(
     print(f"clicourier bridge running with pid {status.pid}")
     print(f"log: {status.log_path}")
 
-    if selected in {"desktop", "local"}:
+    if not should_start_agent:
+        print("bridge is forwarding Telegram messages; no agent was started")
+        print("use /start_agent from Telegram to start the configured agent")
+        return 0
+
+    if should_attach_terminal and selected in {"desktop", "local", "telegram"}:
         session_name = extra_env["AGENT_TMUX_SESSION"]
         if wait_for_tmux_session(session_name):
             print(f"attaching to agent terminal: tmux attach -t {session_name}")
@@ -258,9 +270,6 @@ def run_with_mode_prompt(
         print(f"bridge started, but tmux session is not ready yet: {session_name}", file=sys.stderr)
         print(f"attach later with: tmux attach -t {session_name}")
         return 1
-
-    print("agent is running in tmux; attach with:")
-    print(f"tmux attach -t {extra_env['AGENT_TMUX_SESSION']}")
     return 0
 
 

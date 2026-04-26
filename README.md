@@ -12,10 +12,11 @@ workstation where Telegram is the remote control surface, not the security bound
 
 - Telegram allowlist gate before every handler.
 - Configured CLI agent only; Telegram users cannot run arbitrary shell commands.
-- Codex CLI adapter plus a generic CLI adapter for testing and future agents.
-- Terminal-backed agent session with tmux preferred when available, plus PTY fallback.
-- Final-output Telegram delivery by default, with noisy tool/status lines suppressed.
-- Pending approval detection with explicit `/approve`, `/reject`, and nonce-backed buttons.
+- Codex CLI adapter, Claude/Gemini fallback adapters, and a generic adapter for testing.
+- Codex structured JSONL sessions through `codex exec --json` by default.
+- Terminal-backed tmux/PTY sessions remain available as fallback for TUI-first agents.
+- One throttled Telegram dashboard message per active session, plus separate final/error/artifact messages.
+- Event-backed approvals with explicit `/approve`, `/reject`, reactions, and pending-action buttons.
 - Workspace sandbox for `/ls`, `/tree`, `/cd`, `/cat`, and `/sendfile`.
 - Sensitive file blocking for env files, private keys, cloud credentials, and token-like names.
 - Newest screenshot artifact retrieval from a configured directory.
@@ -147,11 +148,14 @@ clicourier run -- codex
 `clicourier run` asks for `desktop` or `telegram` mode when launched from a terminal.
 Desktop mode creates the mute file, starts the bridge daemon in the background, and
 attaches to the agent's tmux terminal so the CLI stays visible and usable locally.
-Telegram mode removes the mute file, starts the same background bridge, and leaves the
-agent reachable from Telegram. You can attach later with:
+Telegram mode removes the mute file, auto-starts the configured agent in tmux, and
+attaches to that terminal so the console stays visible and interactive while output is
+forwarded to Telegram. If no agent is running when a Telegram request arrives, CliCourier
+starts the configured agent automatically for that chat.
 
 ```bash
-tmux attach -t clicourier
+clicourier run --mode telegram -- codex
+clicourier run --mode telegram
 ```
 
 Background daemon:
@@ -164,18 +168,31 @@ clicourier stop
 
 Any CLI command can be used after `--`, for example `claude` or `gemini`. For non-Codex
 tools use `DEFAULT_AGENT_ADAPTER=generic`; setup infers this for common non-Codex commands.
+The Codex adapter starts structured turns with `codex exec --json <prompt>`. Follow-up
+turns use `codex exec resume --last --json <prompt>`, so final answers, tool events,
+approval requests, and status updates arrive as JSONL events instead of terminal text.
+When you force `AGENT_TERMINAL_BACKEND=tmux` or `pty`, CliCourier falls back to terminal
+capture for local/TUI workflows.
 
 All non-command text from an allowlisted user is sent to the active agent, except
 approval-like words such as `yes` or `approve` when no approval is pending. Use
 `/agent yes` to send those words literally.
 
-When an approval is pending, `yes`, `y`, `ok`, 👍, or a heart approve it; `no`, `n`, or
-👎 reject it. You can also react directly to the approval-request Telegram message with
-thumbs-up/heart or thumbs-down.
+Unknown Telegram slash commands are forwarded to the agent, so CLI-native commands such
+as `/model` or `/reasoning` still work. CliCourier no longer parses arbitrary terminal
+output into menu buttons. Inline buttons are only created for explicit bridge states such
+as approvals and voice transcript confirmation.
 
-By default `AGENT_OUTPUT_MODE=final`, so CliCourier waits for a quiet period before sending
-agent output to Telegram and suppresses common reasoning/tool/status trace lines. Set
-`AGENT_OUTPUT_MODE=stream` if you want raw streaming output.
+When an approval action is pending, `yes`, `y`, `ok`, 👍, or a heart approve it; `no`,
+`n`, or 👎 reject it. The inline buttons use pending-action callback ids such as
+`cc:act_...:approve`; stale or unknown callbacks are rejected. If no approval is pending,
+approval-like text is not sent as an approval. Use `/agent yes` to send that text literally.
+
+By default `AGENT_OUTPUT_MODE=final`, so terminal fallback output is debounced before
+delivery. Structured Codex final answers are sent from `final_message` events. Reasoning,
+tool deltas, and status events update progress/debug state but are not exposed in Telegram
+as raw reasoning unless `/trace_on` is enabled. Use `/tail`, `/log`, or `/sendlog` to
+retrieve recent raw agent events on demand.
 
 To pause proactive Telegram output while you are at the machine:
 
@@ -185,7 +202,7 @@ clicourier unmute
 ```
 
 The same toggle is available from Telegram with `/mute`, `/unmute`, `/desktop`,
-`/telegram`, and `/mute_status`. By default this creates a `muted` file in the project
+`/telegram`, `/mute_status`, `/botstatus`, and `/bothelp`. By default this creates a `muted` file in the project
 working directory. The initial agent prompt explains this to the coding agent, so you can
 ask it to "switch to desktop" or "switch to Telegram" and it can create or delete that
 file.
@@ -200,6 +217,16 @@ uv run pytest
 
 The integration test uses `tests/fixtures/fake_agent.py` so PTY behavior can be tested
 without Codex, Claude, Gemini, or a Telegram bot token.
+
+## Known limitations
+
+- The MVP is still single-user and single active agent session.
+- Claude and Gemini are prepared through adapter capability flags, but structured
+  stream-json mappings are not implemented yet.
+- PTY/tmux fallback can only expose raw terminal deltas and best-effort final-output
+  debouncing; structured streams are preferred whenever an agent supports them.
+- The Telegram chat UI is optimized for approvals, final answers, files, and screenshots,
+  not full terminal operation. See the Mini App console note for the future richer UI.
 
 ## WSL
 
@@ -224,4 +251,5 @@ and leave sensitive file sending disabled by default.
 - [ARCHITECTURE.md](ARCHITECTURE.md) explains the module boundaries and data flow.
 - [COMMANDS.md](COMMANDS.md) lists the Telegram command surface.
 - [SECURITY.md](SECURITY.md) documents the threat model and local hardening notes.
+- [docs/mini-app-console.md](docs/mini-app-console.md) sketches a future Telegram Mini App console.
 - [ROADMAP.md](ROADMAP.md) tracks planned work beyond the MVP.

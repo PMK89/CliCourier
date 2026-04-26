@@ -7,18 +7,30 @@ active agent, except approval-like words when no approval is pending.
 
 | Command | Description |
 | --- | --- |
-| `/status` | Show bridge cwd, agent status, adapter, command, and pending approval state. |
+| `/botstatus` | Show bridge cwd, agent status, adapter, command, and pending approval state. |
 | `/start_agent` | Start the configured adapter and `DEFAULT_AGENT_COMMAND`. |
 | `/stop_agent` | Stop the active agent process. |
 | `/restart_agent` | Stop and start the configured agent. |
 | `/agent <text>` | Send text to the active agent even if it looks like an approval. |
 | `/agents` | List available adapter ids. |
+| `/stream` | Stream agent output to Telegram as it arrives. |
+| `/final` | Return to final/idle output mode. |
+| `/trace_on` | Forward reasoning, tool, and status lines instead of filtering them. |
+| `/trace_off` | Suppress reasoning, tool, and status lines. |
+| `/tail [chars]` | Show recent raw agent event/output text. |
+| `/log [chars]` | Alias for `/tail`. |
+| `/sendlog` | Send recent raw agent event/output text as a file. |
 | `/mute` | Suppress proactive agent output. |
 | `/unmute` | Resume proactive agent output. |
 | `/desktop` | Same as `/mute`; use this when you are working locally. |
 | `/telegram` | Same as `/unmute`; use this when you want proactive Telegram output. |
 | `/mute_status` | Show whether proactive output is muted. |
-| `/help` | Show command help. |
+| `/bothelp` | Show command help. |
+
+Unknown slash commands such as `/status`, `/model`, or `/reasoning` are forwarded to the
+active agent. CliCourier does not parse arbitrary agent output into Telegram choices. Buttons are
+only created from explicit bridge states such as approvals and voice transcript
+confirmation.
 
 ## Approvals
 
@@ -27,10 +39,10 @@ active agent, except approval-like words when no approval is pending.
 | `/approve` | Send the adapter's approve input to the active agent. |
 | `/reject` | Send the adapter's reject input to the active agent. |
 
-When a prompt is detected, CliCourier also sends inline `Approve` and `Reject` buttons with
-a nonce. Short text replies such as `yes`, `ok`, or `no` are only accepted when an approval
-is pending. Reacting to the approval-request message with thumbs-up or a heart approves;
-thumbs-down rejects.
+When an approval event is received, CliCourier sends inline `Approve`, `Reject`,
+`Details`, and `Send log` buttons backed by a pending-action id. Short text replies such
+as `yes`, `ok`, or `no` are only accepted when an approval is pending. Reacting to the
+approval-request message with thumbs-up or a heart approves; thumbs-down rejects.
 
 ## Files
 
@@ -43,6 +55,7 @@ thumbs-down rejects.
 | `/cat <path>` | Return a small non-sensitive text file. |
 | `/sendfile <path>` | Send a safe workspace file as a Telegram document. |
 | `/screenshot` | Send the newest supported image from `SCREENSHOT_DIR`. |
+| `/artifacts` | List recent screenshot artifacts. |
 
 For file commands, `/` means `WORKSPACE_ROOT`, not host `/`.
 
@@ -52,10 +65,11 @@ For file commands, `/` means `WORKSPACE_ROOT`, not host `/`.
 | --- | --- |
 | `/voice_approve` | Send the pending voice transcript to the agent. |
 | `/voice_reject` | Discard the pending voice transcript. |
-| `/voice_edit <text>` | Replace the pending voice transcript. |
 
 Voice messages are ignored unless transcription is configured. A transcript is never sent
-to the agent without confirmation.
+to the agent without confirmation. The confirmation uses `Send`, `Cancel`, and `Edit`
+buttons backed by a pending action. To correct a pending transcript, reply with the edited
+text before approving it.
 
 ## Local CLI
 
@@ -66,7 +80,8 @@ to the agent without confirmation.
 | `clicourier config` | Print config path and a redacted non-secret summary. |
 | `clicourier model download` | Download/load the configured faster-whisper model. |
 | `clicourier model list` | Show configured model, backend, cache status, and known model names. |
-| `clicourier run -- <tool>` | Ask for desktop/telegram mode, start the bridge daemon, and auto-start the CLI tool. |
+| `clicourier run -- <tool>` | Ask for desktop/telegram mode, start the bridge daemon, auto-start the CLI tool in tmux, and attach locally. |
+| `clicourier run --mode telegram` | Enable Telegram forwarding, auto-start the configured agent in tmux, and attach locally. |
 | `clicourier start -- <tool>` | Run the bridge in the background and auto-start the CLI tool. |
 | `clicourier stop` | Stop the background bridge. |
 | `clicourier restart -- <tool>` | Restart the background bridge. |

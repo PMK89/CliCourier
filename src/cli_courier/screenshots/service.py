@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 
 
 class ScreenshotError(ValueError):
@@ -53,6 +54,53 @@ class ScreenshotService:
             raise ScreenshotError("no screenshot image found")
         newest = max(candidates, key=lambda path: path.stat().st_mtime)
         return self._validate_artifact(newest)
+
+    def artifact_for_reference(self, reference: str) -> ScreenshotArtifact:
+        path = Path(reference).expanduser()
+        if not path.is_absolute():
+            path = self.workspace_root / path
+        return self._validate_artifact(path)
+
+    def artifacts_since(self, since: float, *, min_age_seconds: float = 0.3) -> list[ScreenshotArtifact]:
+        directories = self._search_directories()
+        if not directories:
+            return []
+        now = time.time()
+        candidates = []
+        for directory in directories:
+            for path in directory.rglob("*"):
+                if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
+                    continue
+                mtime = path.stat().st_mtime
+                if mtime >= since and now - mtime >= min_age_seconds:
+                    candidates.append(path)
+        artifacts = []
+        for path in sorted(candidates, key=lambda item: item.stat().st_mtime):
+            try:
+                artifacts.append(self._validate_artifact(path))
+            except ScreenshotError:
+                continue
+        return artifacts
+
+    def recent_artifacts(self, *, limit: int = 10) -> list[ScreenshotArtifact]:
+        directories = self._search_directories()
+        if not directories:
+            return []
+        candidates = [
+            path
+            for directory in directories
+            for path in directory.rglob("*")
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        ]
+        artifacts = []
+        for path in sorted(candidates, key=lambda item: item.stat().st_mtime, reverse=True):
+            try:
+                artifacts.append(self._validate_artifact(path))
+            except ScreenshotError:
+                continue
+            if len(artifacts) >= limit:
+                break
+        return artifacts
 
     def _validate_directory(self) -> None:
         if self.screenshot_dir is None:

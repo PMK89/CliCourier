@@ -88,6 +88,20 @@ class PtyAgentProcess:
             raise RuntimeError("agent process is not running")
         await asyncio.to_thread(self._send_text_with_submit, text, submit_sequence)
 
+    async def send_key(self, key: str) -> None:
+        if not self.is_running or self._child is None:
+            raise RuntimeError("agent process is not running")
+        keys = {
+            "Enter": "\r",
+            "Up": "\x1b[A",
+            "Down": "\x1b[B",
+        }
+        try:
+            sequence = keys[key]
+        except KeyError as exc:
+            raise ValueError(f"unsupported key: {key}") from exc
+        await asyncio.to_thread(self._child.send, sequence)
+
     def _send_text_with_submit(self, text: str, submit_sequence: str) -> None:
         assert self._child is not None
         normalized = text.replace("\r\n", "\n").replace("\r", "\n")
