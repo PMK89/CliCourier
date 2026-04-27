@@ -212,6 +212,7 @@ def test_pending_action_creation_and_lookup(tmp_path: Path) -> None:
     action = pending_action(
         kind="approval",
         session_id="codex",
+        chat_id=100,
         choices=(PendingActionChoice(id="approve", label="Approve"),),
         source_event_id="evt_1",
     )
@@ -220,6 +221,8 @@ def test_pending_action_creation_and_lookup(tmp_path: Path) -> None:
 
     assert state.pending_action(action.id) is action
     assert state.active_pending_action("approval") is action
+    assert state.active_pending_action("approval", chat_id=100) is action
+    assert state.active_pending_action("approval", chat_id=200) is None
 
 
 def test_dashboard_rendering_stays_under_telegram_limit() -> None:
@@ -310,9 +313,12 @@ class FakeMessage:
 
     def __init__(self) -> None:
         self.replies: list[str] = []
+        self.text: str | None = None
+        self.caption: str | None = None
         self.voice = None
         self.audio = None
         self.document = None
+        self.photo = []
 
     async def reply_text(self, text: str, **kwargs) -> None:
         self.replies.append(text)
@@ -323,7 +329,9 @@ class FakeBot:
         self.photos = 0
         self.documents: list[str | None] = []
         self.messages: list[str] = []
+        self.send_calls: list[tuple[int, int, str]] = []
         self.edits: list[tuple[int, str]] = []
+        self.edit_calls: list[tuple[int, int, str]] = []
         self.fail_photo = False
         self.commands = None
 
@@ -331,11 +339,14 @@ class FakeBot:
         return None
 
     async def send_message(self, *, chat_id: int, text: str, **kwargs):
+        message_id = len(self.messages) + 1
         self.messages.append(text)
-        return SimpleNamespace(message_id=len(self.messages))
+        self.send_calls.append((message_id, chat_id, text))
+        return SimpleNamespace(message_id=message_id)
 
     async def edit_message_text(self, *, chat_id: int, message_id: int, text: str, **kwargs) -> None:
         self.edits.append((message_id, text))
+        self.edit_calls.append((message_id, chat_id, text))
         if 1 <= message_id <= len(self.messages):
             self.messages[message_id - 1] = text
 
@@ -353,6 +364,17 @@ class FakeBot:
 
 def non_dashboard_messages(messages: list[str]) -> list[str]:
     return [message for message in messages if not message.startswith("Agent:")]
+
+
+def non_dashboard_send_calls(bot: FakeBot) -> list[tuple[int, int, str]]:
+    return [call for call in bot.send_calls if not call[2].startswith("Agent:")]
+
+
+class EditFailBot(FakeBot):
+    async def edit_message_text(self, *, chat_id: int, message_id: int, text: str, **kwargs) -> None:
+        self.edits.append((message_id, text))
+        self.edit_calls.append((message_id, chat_id, text))
+        raise RuntimeError("edit rejected")
 
 
 class FakeTelegramFile:
@@ -393,6 +415,14 @@ class FakeAudioAttachment:
     mime_type = "audio/ogg"
 
 
+class FakeImageAttachment:
+    file_id = "image-1"
+    file_unique_id = "image-unique-1"
+    file_size = 10
+    file_name = "photo.jpg"
+    mime_type = "image/jpeg"
+
+
 class FakeCallbackQuery:
     def __init__(self, data: str) -> None:
         self.data = data
@@ -408,10 +438,10 @@ class FakeCallbackQuery:
 
 
 class FakeCallbackUpdate:
-    def __init__(self, query: FakeCallbackQuery) -> None:
+    def __init__(self, query: FakeCallbackQuery, *, chat_id: int = 100) -> None:
         self.callback_query = query
         self.effective_user = SimpleNamespace(id=42)
-        self.effective_chat = SimpleNamespace(id=100, type="private")
+        self.effective_chat = SimpleNamespace(id=chat_id, type="private")
 
 
 async def test_send_to_agent_acknowledges_when_output_is_muted(tmp_path: Path) -> None:
@@ -556,6 +586,32 @@ async def test_terminal_progress_final_output_updates_same_message_with_last_lin
     assert bot_api.edits[-1] == (1, expected)
 
 
+async def test_terminal_progress_final_tail_does_not_replace_accumulated_page(
+    tmp_path: Path,
+) -> None:
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot_api = FakeBot()
+
+    progress = "".join(f"line {index}\n" for index in range(1, 61))
+
+    await bridge._update_terminal_progress(bot_api, 100, progress)
+    await bridge._send_agent_output(bot_api, 100, "line 60", complete_request=True)
+
+    expected = "\n".join(f"line {index}" for index in range(1, 61))
+    assert bot_api.messages == [expected]
+    assert bot_api.edits[-1] == (1, expected)
+
+
 async def test_send_to_agent_autostarts_agent_when_missing(tmp_path: Path, monkeypatch) -> None:
     app_settings = settings(tmp_path)
     state = RuntimeState.create(tmp_path)
@@ -613,6 +669,7 @@ async def test_approval_callback_requires_matching_pending_action(tmp_path: Path
     action = state.add_pending_action(
         pending_approval_action(
             session_id="codex",
+            chat_id=100,
             source_event_id="evt_1",
             prompt="Run command?",
         )
@@ -638,6 +695,38 @@ async def test_approval_callback_requires_matching_pending_action(tmp_path: Path
     assert query.edits == ["Sent approve."]
 
 
+async def test_approval_callback_rejects_wrong_chat(tmp_path: Path) -> None:
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    action = state.add_pending_action(
+        pending_approval_action(
+            session_id="codex",
+            chat_id=100,
+            source_event_id="evt_1",
+            prompt="Run command?",
+        )
+    )
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    query = FakeCallbackQuery(f"cc:{action.id}:approve")
+    query.message.chat_id = 200
+
+    await bridge.handle_callback(FakeCallbackUpdate(query, chat_id=200), FakeContext())
+
+    assert state.pending_action(action.id) is action
+    assert state.active_agent.sent == []
+    assert query.edits == ["This action belongs to a different chat."]
+
+
 async def test_audio_message_is_transcribed_like_voice(tmp_path: Path) -> None:
     state = RuntimeState.create(tmp_path)
     bridge = TelegramBridgeBot(
@@ -657,7 +746,7 @@ async def test_audio_message_is_transcribed_like_voice(tmp_path: Path) -> None:
 
     await bridge._handle_voice(message, context)
 
-    pending_voice = state.active_pending_action("voice_transcript")
+    pending_voice = state.active_pending_action("voice_transcript", chat_id=100)
     assert pending_voice is not None
     assert pending_voice.data["transcript"] == "send this to the agent"
     assert context.bot.requested_file_id == "file-1"
@@ -679,7 +768,7 @@ async def test_text_reply_updates_pending_voice_transcript(tmp_path: Path) -> No
         ),
         transcriber=DisabledTranscriber(),
     )
-    pending = state.add_pending_action(pending_voice_action_from_transcript("send wrong text"))
+    pending = state.add_pending_action(pending_voice_action_from_transcript("send wrong text", chat_id=100))
     message = FakeMessage()
 
     handled = await bridge._maybe_handle_voice_correction("send corrected text", message)
@@ -712,9 +801,85 @@ async def test_non_audio_document_is_not_transcribed(tmp_path: Path) -> None:
 
     await bridge._handle_voice(message, context)
 
-    assert state.active_pending_action("voice_transcript") is None
+    assert state.active_pending_action("voice_transcript", chat_id=100) is None
     assert context.bot.requested_file_id is None
     assert message.replies == []
+
+
+async def test_photo_caption_is_forwarded_with_saved_image_path(tmp_path: Path) -> None:
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    message = FakeMessage()
+    message.caption = "Please inspect this"
+    message.photo = [FakeImageAttachment()]
+    context = FakeFileContext(b"fake jpeg bytes")
+
+    await bridge.handle_update(
+        SimpleNamespace(
+            effective_message=message,
+            effective_user=SimpleNamespace(id=42),
+            effective_chat=SimpleNamespace(id=100, type="private"),
+            message_reaction=None,
+        ),
+        context,
+    )
+
+    assert len(state.active_agent.sent) == 1
+    sent = state.active_agent.sent[0]
+    assert "Please inspect this" in sent
+    assert "Attached image files from the bridge (including WhatsApp media):" in sent
+    assert "Inspect those local image files as part of this request." in sent
+    assert "incoming-media" in sent
+    assert context.bot.requested_file_id == "image-1"
+
+
+async def test_image_only_message_uses_default_prompt_text(tmp_path: Path) -> None:
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    message = FakeMessage()
+    document = FakeImageAttachment()
+    document.file_name = "whatsapp.png"
+    document.mime_type = "image/png"
+    message.document = document
+    context = FakeFileContext(b"png bytes")
+
+    await bridge.handle_update(
+        SimpleNamespace(
+            effective_message=message,
+            effective_user=SimpleNamespace(id=42),
+            effective_chat=SimpleNamespace(id=100, type="private"),
+            message_reaction=None,
+        ),
+        context,
+    )
+
+    assert len(state.active_agent.sent) == 1
+    sent = state.active_agent.sent[0]
+    assert "Please inspect the attached image." in sent
+    assert "whatsapp" not in sent
+    assert context.bot.requested_file_id == "image-1"
 
 
 def test_agent_output_suppresses_sent_text_echo(tmp_path: Path) -> None:
@@ -740,7 +905,7 @@ def test_agent_output_suppresses_sent_text_echo(tmp_path: Path) -> None:
     )
 
 
-async def test_unknown_slash_command_is_forwarded_to_agent(tmp_path: Path) -> None:
+async def test_unknown_slash_command_is_forwarded_raw_to_agent(tmp_path: Path) -> None:
     app_settings = settings(tmp_path)
     state = RuntimeState.create(tmp_path)
     state.active_agent = FakeAgent()
@@ -758,7 +923,7 @@ async def test_unknown_slash_command_is_forwarded_to_agent(tmp_path: Path) -> No
 
     await bot._handle_command(parse_command("/model gpt-5.5"), FakeMessage(), FakeContext())
 
-    assert state.active_agent.sent[-1].endswith("User request:\n/model gpt-5.5")
+    assert state.active_agent.sent[-1] == "/model gpt-5.5"
 
 
 async def test_status_slash_command_is_forwarded_to_agent(tmp_path: Path) -> None:
@@ -779,7 +944,7 @@ async def test_status_slash_command_is_forwarded_to_agent(tmp_path: Path) -> Non
 
     await bot._handle_command(parse_command("/status"), FakeMessage(), FakeContext())
 
-    assert state.active_agent.sent[-1].endswith("User request:\n/status")
+    assert state.active_agent.sent[-1] == "/status"
 
 
 async def test_botstatus_is_handled_locally(tmp_path: Path) -> None:
@@ -859,6 +1024,53 @@ async def test_choice_reply_is_not_inferred_without_pending_action(tmp_path: Pat
     assert message.replies == []
 
 
+async def test_choice_request_renders_all_options_and_accepts_numeric_reply(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path)
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    bot = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot_api = FakeBot()
+
+    await bot._handle_agent_event(
+        bot_api,
+        100,
+        state.active_agent,
+        AgentEvent(
+            kind=AgentEventKind.CHOICE_REQUEST,
+            text="Select model",
+            session_id="generic",
+            data={
+                "choices": [
+                    {"id": "1", "label": "gpt-5.5", "value": "gpt-5.5"},
+                    {"id": "2", "label": "gpt-5", "value": "gpt-5"},
+                ]
+            },
+        ),
+    )
+
+    assert non_dashboard_messages(bot_api.messages) == [
+        "Select model\n\n1. gpt-5.5\n2. gpt-5\n\nReply with a number."
+    ]
+
+    message = FakeMessage()
+    handled = await bot._maybe_handle_choice_reply("2", message, FakeContext())
+
+    assert handled is True
+    assert state.active_agent.sent == ["gpt-5"]
+    assert state.active_pending_action("choice_request") is None
+    assert message.replies == ["Sent option 2: gpt-5"]
+
+
 async def test_final_flush_retains_output_while_approval_pending(tmp_path: Path) -> None:
     app_settings = settings(
         tmp_path,
@@ -872,6 +1084,7 @@ async def test_final_flush_retains_output_while_approval_pending(tmp_path: Path)
     state.add_pending_action(
         pending_approval_action(
             session_id="generic",
+            chat_id=100,
             source_event_id="evt_1",
             prompt="Approve?",
             now=datetime.now(UTC),
@@ -963,6 +1176,457 @@ async def test_final_flush_sends_buffered_output_when_session_stops(tmp_path: Pa
     assert non_dashboard_messages(bot_api.messages)[-1] == "Final answer before exit."
 
 
+async def test_final_mode_idle_does_not_emit_repeated_final_messages(tmp_path: Path) -> None:
+    app_settings = settings(
+        tmp_path,
+        OUTPUT_FLUSH_INTERVAL_MS="1",
+        FINAL_OUTPUT_IDLE_MS="1",
+        FINAL_OUTPUT_MAX_WAIT_MS="20",
+    )
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    await session.output_queue.put("line 1\n")
+    await session.output_queue.put("line 2\n")
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        await asyncio.sleep(0.05)
+        assert non_dashboard_messages(bot_api.messages) == []
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    assert non_dashboard_messages(bot_api.messages) == ["line 1\nline 2"]
+
+
+async def test_idle_output_is_cached_until_sixty_line_page_is_ready(tmp_path: Path) -> None:
+    app_settings = settings(
+        tmp_path,
+        OUTPUT_FLUSH_INTERVAL_MS="1",
+        FINAL_OUTPUT_IDLE_MS="1",
+        FINAL_OUTPUT_MAX_WAIT_MS="1",
+    )
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    first_half = "".join(f"line {index}\n" for index in range(1, 31))
+    second_half = "".join(f"line {index}\n" for index in range(31, 61))
+    second_page = "".join(f"line {index}\n" for index in range(61, 121))
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        await session.output_queue.put(first_half)
+        await asyncio.sleep(0.05)
+        assert non_dashboard_messages(bot_api.messages) == []
+
+        await session.output_queue.put(second_half)
+        for _ in range(50):
+            if non_dashboard_messages(bot_api.messages):
+                break
+            await asyncio.sleep(0.005)
+
+        await session.output_queue.put(second_page)
+        for _ in range(50):
+            if bot_api.edits:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    expected = "\n".join(f"line {index}" for index in range(61, 121))
+    assert non_dashboard_messages(bot_api.messages) == [expected]
+    assert bot_api.edits[-1][1] == expected
+
+
+async def test_line_by_line_deltas_publish_and_edit_sixty_line_pages(tmp_path: Path) -> None:
+    app_settings = settings(
+        tmp_path,
+        OUTPUT_FLUSH_INTERVAL_MS="1",
+        FINAL_OUTPUT_IDLE_MS="1",
+        FINAL_OUTPUT_MAX_WAIT_MS="1",
+    )
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        for index in range(1, 61):
+            await session.output_queue.put(f"line {index}\n")
+        for _ in range(50):
+            if non_dashboard_messages(bot_api.messages):
+                break
+            await asyncio.sleep(0.005)
+
+        for index in range(61, 121):
+            await session.output_queue.put(f"line {index}\n")
+        for _ in range(50):
+            if bot_api.edits:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    first_expected = "\n".join(f"line {index}" for index in range(1, 61))
+    second_expected = "\n".join(f"line {index}" for index in range(61, 121))
+    agent_sends = non_dashboard_send_calls(bot_api)
+    assert len(agent_sends) == 1
+    assert agent_sends[0][2] == first_expected
+    assert bot_api.edits[-1] == (agent_sends[0][0], second_expected)
+    assert non_dashboard_messages(bot_api.messages) == [second_expected]
+
+
+async def test_short_final_tail_after_line_deltas_keeps_full_buffered_output(
+    tmp_path: Path,
+) -> None:
+    app_settings = settings(
+        tmp_path,
+        OUTPUT_FLUSH_INTERVAL_MS="1",
+        FINAL_OUTPUT_IDLE_MS="1",
+        FINAL_OUTPUT_MAX_WAIT_MS="1",
+    )
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        for index in range(1, 76):
+            await session.output_queue.put(f"line {index}\n")
+        expected = "\n".join(f"line {index}" for index in range(16, 76))
+        await session.output_queue.put(
+            AgentEvent(
+                kind=AgentEventKind.FINAL_MESSAGE,
+                text="line 75",
+                session_id="generic",
+            )
+        )
+        for _ in range(100):
+            if non_dashboard_messages(bot_api.messages) == [expected]:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    assert non_dashboard_messages(bot_api.messages) == [expected]
+
+
+async def test_progress_edits_single_agent_message_with_dashboard_present(tmp_path: Path) -> None:
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    first_page = "".join(f"line {index}\n" for index in range(1, 61))
+    second_page = "".join(f"line {index}\n" for index in range(61, 121))
+    second_expected = "\n".join(f"line {index}" for index in range(61, 121))
+
+    await bridge._maybe_update_dashboard(bot_api, 100, session, force=True)
+    await bridge._update_terminal_progress(bot_api, 100, first_page)
+    await bridge._update_terminal_progress(bot_api, 100, second_page)
+
+    agent_sends = non_dashboard_send_calls(bot_api)
+    assert len(agent_sends) == 1
+    progress_message_id = agent_sends[0][0]
+    assert progress_message_id == 2
+    assert bot_api.edits == [(progress_message_id, second_expected)]
+    assert len(bot_api.messages) == 2
+    assert bot_api.messages[0].startswith("Agent:")
+    assert bot_api.messages[1] == second_expected
+
+
+async def test_complete_output_edits_existing_progress_message_not_new_message(tmp_path: Path) -> None:
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    first_page = "".join(f"line {index}\n" for index in range(1, 61))
+    final_text = "".join(f"line {index}\n" for index in range(1, 126))
+    final_expected = "\n".join(f"line {index}" for index in range(66, 126))
+
+    await bridge._maybe_update_dashboard(bot_api, 100, session, force=True)
+    await bridge._update_terminal_progress(bot_api, 100, first_page)
+    await bridge._send_agent_output(bot_api, 100, final_text, complete_request=True)
+
+    agent_sends = non_dashboard_send_calls(bot_api)
+    assert len(agent_sends) == 1
+    progress_message_id = agent_sends[0][0]
+    assert progress_message_id == 2
+    assert bot_api.edits[-1] == (progress_message_id, final_expected)
+    assert len(bot_api.messages) == 2
+    assert non_dashboard_messages(bot_api.messages) == [final_expected]
+
+
+async def test_progress_logging_records_send_and_edit(tmp_path: Path, capsys) -> None:
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot_api = FakeBot()
+    first_page = "".join(f"line {index}\n" for index in range(1, 61))
+    second_page = "".join(f"line {index}\n" for index in range(61, 121))
+
+    await bridge._update_terminal_progress(bot_api, 100, first_page)
+    await bridge._update_terminal_progress(bot_api, 100, second_page)
+
+    log_output = capsys.readouterr().out
+    assert "clicourier agent_output action=progress_send_ok chat_id=100 message_id=1" in log_output
+    assert "clicourier agent_output action=progress_edit_ok chat_id=100 message_id=1" in log_output
+
+
+async def test_progress_edit_failure_is_logged_without_sending_extra_message(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot_api = EditFailBot()
+    first_page = "".join(f"line {index}\n" for index in range(1, 61))
+    second_page = "".join(f"line {index}\n" for index in range(61, 121))
+
+    await bridge._update_terminal_progress(bot_api, 100, first_page)
+    await bridge._update_terminal_progress(bot_api, 100, second_page)
+
+    log_output = capsys.readouterr().out
+    assert "clicourier agent_output action=progress_edit_failed chat_id=100 message_id=1" in log_output
+    assert "RuntimeError: edit rejected" in log_output
+    assert len(bot_api.messages) == 1
+    assert len(non_dashboard_send_calls(bot_api)) == 1
+
+
+async def test_structured_mode_waits_for_turn_completion_before_short_final_output(
+    tmp_path: Path,
+) -> None:
+    app_settings = settings(
+        tmp_path,
+        OUTPUT_FLUSH_INTERVAL_MS="1",
+        FINAL_OUTPUT_IDLE_MS="1",
+        FINAL_OUTPUT_MAX_WAIT_MS="20",
+    )
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    session.backend = "structured"
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        await session.output_queue.put("line 1\n")
+        await asyncio.sleep(0.05)
+        assert non_dashboard_messages(bot_api.messages) == []
+
+        await session.output_queue.put(
+            AgentEvent(
+                kind=AgentEventKind.TURN_COMPLETED,
+                text="Turn completed.",
+                session_id="generic",
+            )
+        )
+        for _ in range(50):
+            if non_dashboard_messages(bot_api.messages):
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    assert non_dashboard_messages(bot_api.messages) == ["line 1"]
+
+
+async def test_structured_mode_edits_one_progress_message_for_output_pages(
+    tmp_path: Path,
+) -> None:
+    app_settings = settings(
+        tmp_path,
+        OUTPUT_FLUSH_INTERVAL_MS="1",
+        FINAL_OUTPUT_IDLE_MS="1",
+        FINAL_OUTPUT_MAX_WAIT_MS="20",
+    )
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    session.backend = "structured"
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    first_page = "".join(f"line {index}\n" for index in range(1, 61))
+    second_page = "".join(f"line {index}\n" for index in range(61, 121))
+    final_text = "".join(f"line {index}\n" for index in range(1, 126))
+    expected = "\n".join(f"line {index}" for index in range(66, 126))
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        await session.output_queue.put(first_page)
+        await asyncio.sleep(0.02)
+        await session.output_queue.put(second_page)
+        await asyncio.sleep(0.02)
+        await session.output_queue.put(
+            AgentEvent(
+                kind=AgentEventKind.FINAL_MESSAGE,
+                text=final_text,
+                session_id="generic",
+            )
+        )
+        for _ in range(100):
+            if non_dashboard_messages(bot_api.messages) == [expected]:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    assert non_dashboard_messages(bot_api.messages) == [expected]
+    assert bot_api.edits
+
+
+async def test_stream_mode_progress_keeps_rolling_sixty_lines_across_flushes(tmp_path: Path) -> None:
+    app_settings = settings(
+        tmp_path,
+        AGENT_OUTPUT_MODE="stream",
+        OUTPUT_FLUSH_INTERVAL_MS="1",
+    )
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    first_page = "".join(f"line {index}\n" for index in range(1, 61))
+    second_page = "".join(f"line {index}\n" for index in range(61, 121))
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        await session.output_queue.put(first_page)
+        await asyncio.sleep(0.02)
+        await session.output_queue.put(second_page)
+        await asyncio.sleep(0.05)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    expected = "\n".join(f"line {index}" for index in range(61, 121))
+
+    assert non_dashboard_messages(bot_api.messages)[-1] == expected
+
+
 async def test_final_message_prefers_buffered_output_when_final_event_is_only_tail(tmp_path: Path) -> None:
     app_settings = settings(
         tmp_path,
@@ -1009,6 +1673,113 @@ async def test_final_message_prefers_buffered_output_when_final_event_is_only_ta
     )
 
 
+async def test_flush_progress_filters_trace_lines_and_edits_to_full_final_output(
+    tmp_path: Path,
+) -> None:
+    app_settings = settings(
+        tmp_path,
+        OUTPUT_FLUSH_INTERVAL_MS="1",
+        FINAL_OUTPUT_IDLE_MS="5000",
+        FINAL_OUTPUT_MAX_WAIT_MS="5000",
+    )
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    await session.output_queue.put("Working (14s • esc to interrupt)\n")
+    await session.output_queue.put("⠋ Reading files\n")
+    await session.output_queue.put("Fixed startup and Telegram forwarding.\n")
+    await session.output_queue.put("\nVerification:\n")
+    await session.output_queue.put(
+        AgentEvent(
+            kind=AgentEventKind.FINAL_MESSAGE,
+            text="Verification:",
+            session_id="generic",
+        )
+    )
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        for _ in range(50):
+            if non_dashboard_messages(bot_api.messages):
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    assert non_dashboard_messages(bot_api.messages)[-1] == (
+        "Fixed startup and Telegram forwarding.\n\nVerification:"
+    )
+    assert "Working" not in non_dashboard_messages(bot_api.messages)[-1]
+    assert "Reading files" not in non_dashboard_messages(bot_api.messages)[-1]
+
+
+async def test_flush_prefers_full_buffered_multiline_output_over_short_final_tail(
+    tmp_path: Path,
+) -> None:
+    app_settings = settings(
+        tmp_path,
+        OUTPUT_FLUSH_INTERVAL_MS="1",
+        FINAL_OUTPUT_IDLE_MS="5000",
+        FINAL_OUTPUT_MAX_WAIT_MS="5000",
+    )
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    await session.output_queue.put(
+        "Current state is Telegram mode.\n\n"
+        "/home/pmk/.local/state/clicourier/muted does not exist, so proactive output is not muted.\n\n"
+        "One caveat: final replies still get through.\n"
+    )
+    await session.output_queue.put(
+        AgentEvent(
+            kind=AgentEventKind.FINAL_MESSAGE,
+            text="One caveat: final replies still get through.",
+            session_id="generic",
+        )
+    )
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        for _ in range(50):
+            if non_dashboard_messages(bot_api.messages):
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    assert non_dashboard_messages(bot_api.messages)[-1] == (
+        "Current state is Telegram mode.\n\n"
+        "/home/pmk/.local/state/clicourier/muted does not exist, so proactive output is not muted.\n\n"
+        "One caveat: final replies still get through."
+    )
+
+
 async def test_terminal_progress_edits_current_sixty_line_page(tmp_path: Path) -> None:
     bot_api = FakeBot()
     bridge = TelegramBridgeBot(
@@ -1049,6 +1820,30 @@ async def test_terminal_progress_keeps_one_message_after_sixty_lines(tmp_path: P
 
     assert len(bot_api.messages) == 1
     assert bot_api.messages[0].splitlines() == [f"line {number}" for number in range(1, 61)]
+
+
+async def test_nonfinal_agent_output_uses_single_progress_message(tmp_path: Path) -> None:
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+
+    first_page = "".join(f"line {index}\n" for index in range(1, 61))
+    second_page = "".join(f"line {index}\n" for index in range(61, 121))
+
+    await bridge._send_agent_output(bot_api, 100, first_page)
+    await bridge._send_agent_output(bot_api, 100, second_page)
+
+    assert bot_api.messages == [second_page.strip()]
+    assert bot_api.edits == [(1, second_page.strip())]
 
 
 async def test_agent_output_sends_referenced_screenshot_as_document_fallback(tmp_path: Path) -> None:

@@ -179,6 +179,16 @@ def test_custom_workspace_default_is_preserved(tmp_path: Path) -> None:
     assert default_workspace_prompt_value({"WORKSPACE_ROOT": str(tmp_path)}) == str(tmp_path)
 
 
+def test_restart_fails_when_existing_daemon_does_not_stop(monkeypatch, capsys) -> None:
+    monkeypatch.setattr("cli_courier.cli.stop_daemon", lambda: DaemonStatus(True, 321, Path("pid"), Path("log")))
+
+    result = clicourier.cli.main(["restart"])
+
+    captured = capsys.readouterr()
+    assert result == 1
+    assert "failed to stop existing clicourier process: 321" in captured.err
+
+
 def test_doctor_checks_can_run_with_missing_dependencies(tmp_path: Path) -> None:
     config_path = init_config(tmp_path / "config.env", interactive=False)
 

@@ -99,7 +99,7 @@ class StructuredCodexProcess:
                     data={"command": command, "resume": resume},
                 )
             )
-            saw_final_message = False
+            final_message_text = ""
             try:
                 self._process = await asyncio.create_subprocess_exec(
                     *command,
@@ -118,20 +118,23 @@ class StructuredCodexProcess:
                     )
                     if event is None:
                         continue
-                    saw_final_message = saw_final_message or event.kind == AgentEventKind.FINAL_MESSAGE
+                    if event.kind == AgentEventKind.FINAL_MESSAGE:
+                        final_message_text = _select_final_message_text(final_message_text, event.text)
+                        continue
+                    if event.kind in {AgentEventKind.TURN_STARTED, AgentEventKind.TURN_COMPLETED}:
+                        continue
                     await self.output_queue.put(event)
                 returncode = await self._process.wait()
                 await stderr_task
-                if not saw_final_message:
-                    final_text = _read_output_file(output_path)
-                    if final_text:
-                        await self.output_queue.put(
-                            AgentEvent(
-                                kind=AgentEventKind.FINAL_MESSAGE,
-                                text=final_text,
-                                session_id=self.adapter.id,
-                            )
+                final_text = _select_final_message_text(final_message_text, _read_output_file(output_path))
+                if final_text:
+                    await self.output_queue.put(
+                        AgentEvent(
+                            kind=AgentEventKind.FINAL_MESSAGE,
+                            text=final_text,
+                            session_id=self.adapter.id,
                         )
+                    )
                 if returncode == 0:
                     await self.output_queue.put(
                         AgentEvent(
@@ -189,3 +192,19 @@ def _read_output_file(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="replace").strip()
     except FileNotFoundError:
         return ""
+
+
+def _select_final_message_text(current: str, candidate: str) -> str:
+    current = current.strip()
+    candidate = candidate.strip()
+    if not current:
+        return candidate
+    if not candidate:
+        return current
+    if candidate == current:
+        return candidate
+    if len(candidate) > len(current) and (candidate.endswith(current) or current in candidate):
+        return candidate
+    if len(current) > len(candidate) and (current.endswith(candidate) or candidate in current):
+        return current
+    return candidate

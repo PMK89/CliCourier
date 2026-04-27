@@ -15,7 +15,7 @@ workstation where Telegram is the remote control surface, not the security bound
 - Codex CLI adapter, Claude/Gemini fallback adapters, and a generic adapter for testing.
 - Codex structured JSONL sessions through `codex exec --json` by default.
 - Terminal-backed tmux/PTY sessions remain available as fallback for TUI-first agents.
-- One throttled Telegram dashboard message per active session, plus separate final/error/artifact messages.
+- One throttled Telegram dashboard message per active session, plus a dedicated `/progress` rolling message and separate final/error/artifact messages.
 - Event-backed approvals with explicit `/approve`, `/reject`, reactions, and pending-action buttons.
 - Workspace sandbox for `/ls`, `/tree`, `/cd`, `/cat`, and `/sendfile`.
 - Sensitive file blocking for env files, private keys, cloud credentials, and token-like names.
@@ -178,8 +178,9 @@ All non-command text from an allowlisted user is sent to the active agent, excep
 approval-like words such as `yes` or `approve` when no approval is pending. Use
 `/agent yes` to send those words literally.
 
-Unknown Telegram slash commands are forwarded to the agent, so CLI-native commands such
-as `/model` or `/reasoning` still work. CliCourier no longer parses arbitrary terminal
+Unknown Telegram slash commands are forwarded raw to the agent, so CLI-native commands such
+as `/model` or `/reasoning` still keep their leading `/` and still work on the first turn.
+CliCourier no longer parses arbitrary terminal
 output into menu buttons. Inline buttons are only created for explicit bridge states such
 as approvals and voice transcript confirmation.
 
@@ -188,11 +189,18 @@ When an approval action is pending, `yes`, `y`, `ok`, 👍, or a heart approve i
 `cc:act_...:approve`; stale or unknown callbacks are rejected. If no approval is pending,
 approval-like text is not sent as an approval. Use `/agent yes` to send that text literally.
 
-By default `AGENT_OUTPUT_MODE=final`, so terminal fallback output is debounced before
-delivery. Structured Codex final answers are sent from `final_message` events. Reasoning,
-tool deltas, and status events update progress/debug state but are not exposed in Telegram
-as raw reasoning unless `/trace_on` is enabled. Use `/tail`, `/log`, or `/sendlog` to
-retrieve recent raw agent events on demand.
+Agent output is shown through one editable progress message per chat: CliCourier sends
+the first 60 completed lines, edits that same message for each next 60-line page, and
+edits it one last time to the final tail when the turn completes. Structured Codex final
+answers are sent from `final_message` events. Reasoning, tool deltas, and status events
+update progress/debug state but are not exposed in Telegram as raw reasoning unless
+`/trace_on` is enabled. Use `/tail`, `/log`, or `/sendlog` to retrieve recent raw agent
+events on demand.
+
+The daemon log records progress-message operations without message content, for example
+`clicourier agent_output action=progress_send_ok ...`,
+`action=progress_edit_ok`, and `action=progress_edit_failed`. Use `clicourier logs` to
+inspect whether Telegram edits are succeeding or being rejected by the Bot API.
 
 To pause proactive Telegram output while you are at the machine:
 
@@ -223,8 +231,8 @@ without Codex, Claude, Gemini, or a Telegram bot token.
 - The MVP is still single-user and single active agent session.
 - Claude and Gemini are prepared through adapter capability flags, but structured
   stream-json mappings are not implemented yet.
-- PTY/tmux fallback can only expose raw terminal deltas and best-effort final-output
-  debouncing; structured streams are preferred whenever an agent supports them.
+- PTY/tmux fallback can only expose raw terminal deltas; structured streams are preferred
+  whenever an agent supports them because they provide explicit turn completion.
 - The Telegram chat UI is optimized for approvals, final answers, files, and screenshots,
   not full terminal operation. See the Mini App console note for the future richer UI.
 

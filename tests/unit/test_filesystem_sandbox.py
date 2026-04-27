@@ -58,3 +58,23 @@ def test_list_marks_sensitive_entries(tmp_path: Path) -> None:
 
     entries = sandbox.list_dir()
     assert entries[0].display_name == ".env.local [sensitive]"
+
+
+def test_cat_blocks_sensitive_directory_contents(tmp_path: Path) -> None:
+    secret_dir = tmp_path / "secrets"
+    secret_dir.mkdir()
+    (secret_dir / "notes.txt").write_text("top secret", encoding="utf-8")
+    sandbox = make_sandbox(tmp_path)
+
+    with pytest.raises(SandboxViolation, match="sensitive"):
+        sandbox.cat_file("secrets/notes.txt")
+
+
+def test_sendfile_blocks_sensitive_directory_contents(tmp_path: Path) -> None:
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    (private_dir / "report.txt").write_text("confidential", encoding="utf-8")
+    sandbox = make_sandbox(tmp_path)
+
+    with pytest.raises(SandboxViolation, match="sensitive"):
+        sandbox.validate_sendfile("private/report.txt")

@@ -40,6 +40,22 @@ def render_dashboard(
     return chunk_text(body, limit)[0]
 
 
+def render_progress(
+    lines: list[str],
+    *,
+    limit: int = TELEGRAM_MESSAGE_LIMIT,
+) -> str:
+    kept = [line for line in lines if line is not None]
+    while kept:
+        text = "\n".join(kept).strip()
+        if text and len(text) <= limit:
+            return text
+        if len(kept) == 1:
+            return kept[0][-limit:] if limit > 0 else ""
+        kept = kept[1:]
+    return ""
+
+
 def _one_line(text: str) -> str:
     return " ".join(text.split())
 
@@ -52,4 +68,3 @@ def _truncate_middle(text: str, limit: int) -> str:
     head = keep // 3
     tail = keep - head
     return f"{text[:head]}{marker}{text[-tail:]}"
-

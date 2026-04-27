@@ -95,20 +95,22 @@ The bot's file-command cwd is independent from the agent process cwd.
 
 `AgentEvent` is the internal contract between adapters and Telegram. Structured adapters
 map native events directly. Terminal fallback maps raw output to `assistant_delta` and
-uses the old debounce/filter path only as a fallback.
+uses the same editable progress-message renderer as structured output.
 
-`AGENT_OUTPUT_MODE=final` is the default for terminal fallback. The bridge buffers output
-and sends it after `FINAL_OUTPUT_IDLE_MS` of quiet time or `FINAL_OUTPUT_MAX_WAIT_MS`,
-whichever comes first. Structured Codex final answers are sent from `final_message`
-events, while reasoning/tool/status events are treated as progress/debug data and are not
-shown as raw Telegram messages unless `/trace_on` is enabled.
-
-`AGENT_OUTPUT_MODE=stream` restores chunked streaming behavior.
+The bridge does not chunk agent output into a stream of chat messages. It sends one
+progress message after 60 completed lines, edits that same message after each additional
+60-line page, and force-edits it to the final tail when a structured `final_message`,
+`turn_completed`, or session stop arrives. Structured Codex final answers are sent from
+`final_message` events, while reasoning/tool/status events are treated as progress/debug
+data and are not shown as raw Telegram messages unless `/trace_on` is enabled.
 
 Telegram maintains one editable dashboard/status message per active session. It shows the
 agent, state, cwd, current tool or phase, last important event, and a short output tail.
 Updates are throttled to avoid flooding the chat and rendered under Telegram's message
 limit.
+
+Rolling terminal output uses a separate editable progress message so visible output is
+distinct from the dashboard summary without flooding the chat.
 
 Approvals and voice transcripts are represented as `PendingAction` records. Button
 callbacks use `cc:<action-id>:<choice-id>`, stale callbacks are rejected, and `yes`/`no`

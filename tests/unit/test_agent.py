@@ -9,6 +9,7 @@ from cli_courier.agent.codex_jsonl import parse_codex_jsonl_line, parse_codex_js
 from cli_courier.agent.events import AgentEventKind
 from cli_courier.agent.output_filter import agent_output_in_progress, prepare_agent_output
 from cli_courier.agent.session import AgentSession, resolve_agent_backend, resolve_terminal_backend
+from cli_courier.agent.structured import _select_final_message_text
 from cli_courier.agent.tmux import safe_tmux_session_name
 
 
@@ -247,6 +248,16 @@ def test_codex_jsonl_maps_session_and_final_message() -> None:
     assert events[1].text == "Done."
 
 
+def test_codex_jsonl_maps_commentary_assistant_message_to_delta() -> None:
+    event = parse_codex_jsonl_line(
+        '{"type":"assistant_message","channel":"commentary","message":"Working on it."}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.ASSISTANT_DELTA
+    assert event.text == "Working on it."
+
+
 def test_codex_jsonl_maps_tool_events() -> None:
     event = parse_codex_jsonl_line(
         '{"type":"response_item","item":{"type":"function_call","name":"shell",'
@@ -257,6 +268,17 @@ def test_codex_jsonl_maps_tool_events() -> None:
     assert event.kind == AgentEventKind.TOOL_STARTED
     assert event.tool_name == "shell"
     assert event.tool_call_id == "call_1"
+
+
+def test_codex_jsonl_maps_response_item_commentary_message_to_delta() -> None:
+    event = parse_codex_jsonl_line(
+        '{"type":"response_item","item":{"type":"message","role":"assistant",'
+        '"channel":"commentary","content":[{"type":"output_text","text":"Progress update"}]}}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.ASSISTANT_DELTA
+    assert event.text == "Progress update"
 
 
 def test_codex_jsonl_maps_tool_output() -> None:
@@ -270,6 +292,18 @@ def test_codex_jsonl_maps_tool_output() -> None:
     assert event.text == "tests passed"
 
 
+def test_structured_final_message_prefers_full_output_file_text() -> None:
+    full_text = "\n".join(f"bridge-test line {index}" for index in range(21, 81))
+
+    assert _select_final_message_text("bridge-test line 80", full_text) == full_text
+
+
+def test_structured_final_message_keeps_longer_streamed_text_without_output_file() -> None:
+    streamed = "Line 1\nLine 2\nLine 3"
+
+    assert _select_final_message_text(streamed, "Line 3") == streamed
+
+
 def test_codex_jsonl_maps_approval_request() -> None:
     event = parse_codex_jsonl_line(
         '{"type":"approval_requested","id":"approval_1","message":"Run tests?",'
@@ -280,3 +314,30 @@ def test_codex_jsonl_maps_approval_request() -> None:
     assert event.kind == AgentEventKind.APPROVAL_REQUESTED
     assert event.approval_id == "approval_1"
     assert event.text == "Run tests?"
+
+
+def test_codex_jsonl_maps_choice_request() -> None:
+    event = parse_codex_jsonl_line(
+        '{"type":"choice_request","prompt":"Select model",'
+        '"choices":[{"id":"1","label":"gpt-5.5","value":"gpt-5.5"},'
+        '{"id":"2","label":"gpt-5","value":"gpt-5"}]}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.CHOICE_REQUEST
+    assert event.text == "Select model"
+    assert event.data["choices"] == [
+        {"id": "1", "label": "gpt-5.5", "value": "gpt-5.5"},
+        {"id": "2", "label": "gpt-5", "value": "gpt-5"},
+    ]
+
+
+def test_codex_jsonl_prefers_prompt_over_placeholder_text_for_choice_request() -> None:
+    event = parse_codex_jsonl_line(
+        '{"type":"choice_request","text":"{{prompt}}","prompt":"Select model",'
+        '"choices":[{"id":"1","label":"gpt-5.5","value":"gpt-5.5"}]}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.CHOICE_REQUEST
+    assert event.text == "Select model"

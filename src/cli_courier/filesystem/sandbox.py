@@ -26,6 +26,17 @@ class FileEntry:
 
 
 SENSITIVE_DIR_NAMES = {".ssh", ".aws", ".kube", ".gnupg", ".docker"}
+SENSITIVE_PATH_PART_NAMES = {
+    "secret",
+    "secrets",
+    "private",
+    "credential",
+    "credentials",
+    "token",
+    "tokens",
+    "key",
+    "keys",
+}
 SENSITIVE_EXACT_NAMES = {
     ".env",
     ".netrc",
@@ -167,6 +178,8 @@ class Sandbox:
             return True
         parts = [part.lower() for part in relative.parts]
         if any(part in SENSITIVE_DIR_NAMES for part in parts):
+            return True
+        if any(part in SENSITIVE_PATH_PART_NAMES for part in parts[:-1]):
             return True
         name = resolved.name.lower()
         if name in SENSITIVE_EXACT_NAMES:

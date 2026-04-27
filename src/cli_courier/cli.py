@@ -85,7 +85,10 @@ def main(argv: list[str] | None = None) -> int:
         print("clicourier stopped" if not status.running else f"clicourier still running: {status.pid}")
         return 0 if not status.running else 1
     if command == "restart":
-        stop_daemon()
+        stopped = stop_daemon()
+        if stopped.running:
+            print(f"failed to stop existing clicourier process: {stopped.pid}", file=sys.stderr)
+            return 1
         status = start_daemon(config_path=config_path, agent_command=normalize_remainder(args.agent) or None)
         print(f"clicourier running with pid {status.pid}" if status.running else "failed to start")
         return 0 if status.running else 1

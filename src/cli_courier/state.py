@@ -62,6 +62,7 @@ class PendingAction:
     id: str
     kind: str
     session_id: str | None
+    chat_id: int | None
     created_at: datetime
     expires_at: datetime
     choices: tuple[PendingActionChoice, ...]
@@ -127,13 +128,16 @@ class RuntimeState:
         kind: str,
         *,
         session_id: str | None = None,
+        chat_id: int | None = None,
         now: datetime | None = None,
     ) -> PendingAction | None:
         self.prune_expired_pending_actions(now)
         actions = [
             action
             for action in self.pending_actions.values()
-            if action.kind == kind and (session_id is None or action.session_id == session_id)
+            if action.kind == kind
+            and (session_id is None or action.session_id == session_id)
+            and (chat_id is None or action.chat_id == chat_id)
         ]
         if not actions:
             return None
@@ -142,12 +146,26 @@ class RuntimeState:
     def clear_pending_action(self, action_id: str) -> None:
         self.pending_actions.pop(action_id, None)
 
-    def clear_pending_actions(self, *, kind: str | None = None) -> None:
+    def clear_pending_actions(self, *, kind: str | None = None, chat_id: int | None = None) -> None:
         if kind is None:
-            self.pending_actions.clear()
+            if chat_id is None:
+                self.pending_actions.clear()
+                return
+            for action_id in [
+                action.id for action in self.pending_actions.values() if action.chat_id == chat_id
+            ]:
+                self.pending_actions.pop(action_id, None)
+            return
+        if chat_id is None:
+            for action_id in [
+                action.id for action in self.pending_actions.values() if action.kind == kind
+            ]:
+                self.pending_actions.pop(action_id, None)
             return
         for action_id in [
-            action.id for action in self.pending_actions.values() if action.kind == kind
+            action.id
+            for action in self.pending_actions.values()
+            if action.kind == kind and action.chat_id == chat_id
         ]:
             self.pending_actions.pop(action_id, None)
 
@@ -202,6 +220,7 @@ def pending_action(
     kind: str,
     choices: tuple[PendingActionChoice, ...],
     session_id: str | None = None,
+    chat_id: int | None = None,
     source_event_id: str | None = None,
     ttl: timedelta = timedelta(minutes=10),
     now: datetime | None = None,
@@ -212,6 +231,7 @@ def pending_action(
         id=new_action_id(),
         kind=kind,
         session_id=session_id,
+        chat_id=chat_id,
         created_at=created,
         expires_at=created + ttl,
         choices=choices,
@@ -223,6 +243,7 @@ def pending_action(
 def pending_approval_action(
     *,
     session_id: str | None,
+    chat_id: int | None,
     source_event_id: str | None,
     prompt: str,
     ttl: timedelta = timedelta(minutes=10),
@@ -232,6 +253,7 @@ def pending_approval_action(
     return pending_action(
         kind="approval",
         session_id=session_id,
+        chat_id=chat_id,
         source_event_id=source_event_id,
         ttl=ttl,
         now=now,
@@ -249,12 +271,14 @@ def pending_voice_action_from_transcript(
     transcript: str,
     *,
     session_id: str | None = None,
+    chat_id: int | None = None,
     ttl: timedelta = timedelta(minutes=10),
     now: datetime | None = None,
 ) -> PendingAction:
     return pending_action(
         kind="voice_transcript",
         session_id=session_id,
+        chat_id=chat_id,
         ttl=ttl,
         now=now,
         choices=(

@@ -27,8 +27,9 @@ active agent, except approval-like words when no approval is pending.
 | `/mute_status` | Show whether proactive output is muted. |
 | `/bothelp` | Show command help. |
 
-Unknown slash commands such as `/status`, `/model`, or `/reasoning` are forwarded to the
-active agent. CliCourier does not parse arbitrary agent output into Telegram choices. Buttons are
+Unknown slash commands such as `/status`, `/model`, or `/reasoning` are forwarded raw to the
+active agent, so CLI-native slash handling still sees the leading `/` even on the first turn.
+CliCourier does not parse arbitrary agent output into Telegram choices. Buttons are
 only created from explicit bridge states such as approvals and voice transcript
 confirmation.
 

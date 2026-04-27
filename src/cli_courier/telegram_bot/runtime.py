@@ -16,15 +16,17 @@ from cli_courier.agent.approval import (
     interpret_approval_text,
 )
 from cli_courier.agent.chunking import chunk_text
-from cli_courier.agent.output_filter import agent_output_in_progress, prepare_agent_output
+from cli_courier.agent.output_filter import prepare_agent_output
 from cli_courier.agent.session import AgentSession
 from cli_courier.config import AgentOutputMode, Settings, TranscriptionBackend, WhisperBackend
 from cli_courier.filesystem import Sandbox, SandboxViolation
 from cli_courier.screenshots import ScreenshotError, ScreenshotService
 from cli_courier.security.terminal import safe_excerpt, sanitize_terminal_text
 from cli_courier.state import (
+    PendingActionChoice,
     PendingAction,
     RuntimeState,
+    pending_action,
     pending_approval_action,
     pending_voice_action_from_transcript,
 )
@@ -35,7 +37,7 @@ from cli_courier.telegram_bot.commands import (
     ParsedCommand,
     parse_command,
 )
-from cli_courier.telegram_bot.dashboard import DashboardSnapshot, render_dashboard
+from cli_courier.telegram_bot.dashboard import DashboardSnapshot, render_dashboard, render_progress
 from cli_courier.telegram_bot.router import RouteKind, route_text
 from cli_courier.voice import (
     DisabledTranscriber,
@@ -47,6 +49,7 @@ from cli_courier.voice import (
 )
 
 TERMINAL_PROGRESS_PAGE_LINES = 60
+TELEGRAM_TEXT_LIMIT = 4096
 
 
 @dataclass
@@ -180,27 +183,33 @@ class TelegramBridgeBot:
             else:
                 await self._handle_voice(message, context, stop_typing=True)
             return
-        if message.text is None:
+        image_paths = await self._download_prompt_images(message, context)
+        if image_paths is None:
             return
-        if await self._maybe_handle_voice_correction(message.text, message):
+        text = self._message_text(message)
+        if text is None and image_paths:
+            text = "Please inspect the attached image."
+        if text is None:
             return
-        if await self._maybe_handle_choice_reply(message.text, message, context):
+        if await self._maybe_handle_voice_correction(text, message):
+            return
+        if await self._maybe_handle_choice_reply(text, message, context):
             return
 
         route = route_text(
-            message.text,
-            has_pending_approval=self.state.active_pending_action("approval") is not None,
+            text,
+            has_pending_approval=self.state.active_pending_action("approval", chat_id=message.chat_id) is not None,
         )
         if route.kind == RouteKind.EMPTY:
             return
         if route.kind == RouteKind.COMMAND and route.command is not None:
-            await self._handle_command(route.command, message, context)
+            await self._handle_command(route.command, message, context, image_paths=image_paths)
         elif route.kind == RouteKind.APPROVAL and route.approval_decision is not None:
             await self._handle_approval(route.approval_decision, message, context)
         elif route.kind == RouteKind.BLOCKED_APPROVAL:
             await message.reply_text("No approval is pending. Use /agent yes to send that text anyway.")
         elif route.kind == RouteKind.AGENT_TEXT:
-            await self._send_to_agent(route.text, message, context)
+            await self._send_to_agent(route.text, message, context, image_paths=image_paths)
 
     async def handle_callback(self, update, context) -> None:
         query = update.callback_query
@@ -222,6 +231,10 @@ class TelegramBridgeBot:
         if action is None:
             await query.edit_message_text("This action expired or is no longer pending.")
             return
+        message = getattr(query, "message", None)
+        if action.chat_id is not None and getattr(message, "chat_id", None) != action.chat_id:
+            await query.edit_message_text("This action belongs to a different chat.")
+            return
         if action.choice(choice_id) is None:
             await query.edit_message_text("This action choice is no longer valid.")
             return
@@ -230,7 +243,7 @@ class TelegramBridgeBot:
         elif action.kind == "voice_transcript":
             await self._handle_pending_voice_callback(action, choice_id, query, context)
         elif action.kind == "choice_request":
-            await query.edit_message_text("This choice request is no longer supported in Telegram.")
+            await self._handle_pending_choice_callback(action, choice_id, query, context)
 
     async def handle_reaction(self, update, context) -> None:
         reaction_update = update.message_reaction
@@ -240,7 +253,7 @@ class TelegramBridgeBot:
         if not is_authorized(identity, self.settings):
             return
 
-        pending = self.state.active_pending_action("approval")
+        pending = self.state.active_pending_action("approval", chat_id=reaction_update.chat.id)
         if pending is None:
             return
         if pending.message_id is not None and reaction_update.message_id != pending.message_id:
@@ -264,7 +277,14 @@ class TelegramBridgeBot:
             text=f"Sent {decision}.",
         )
 
-    async def _handle_command(self, command: ParsedCommand, message, context) -> None:
+    async def _handle_command(
+        self,
+        command: ParsedCommand,
+        message,
+        context,
+        *,
+        image_paths: tuple[Path, ...] = (),
+    ) -> None:
         handlers = {
             "botstatus": self._cmd_status,
             "start_agent": self._cmd_start_agent,
@@ -305,7 +325,16 @@ class TelegramBridgeBot:
             forwarded = f"/{command.name}"
             if command.args:
                 forwarded = f"{forwarded} {command.args}"
-            await self._send_to_agent(forwarded, message, context)
+            await self._send_to_agent(
+                forwarded,
+                message,
+                context,
+                image_paths=image_paths,
+                preserve_leading_slash=True,
+            )
+            return
+        if command.name == "agent":
+            await handler(command.args, message, context, image_paths=image_paths)
             return
         await handler(command.args, message, context)
 
@@ -322,7 +351,7 @@ class TelegramBridgeBot:
                 f"state: {status.state}\n"
                 f"command: {' '.join(status.command)}"
             )
-        pending = "yes" if self.state.active_pending_action("approval") else "no"
+        pending = "yes" if self.state.active_pending_action("approval", chat_id=message.chat_id) else "no"
         muted = "yes" if self._notifications_muted() else "no"
         await message.reply_text(
             f"{agent_status}\n"
@@ -395,11 +424,11 @@ class TelegramBridgeBot:
             self.state.active_agent = None
         await self._cmd_start_agent(args, message, context)
 
-    async def _cmd_agent(self, args: str, message, context) -> None:
+    async def _cmd_agent(self, args: str, message, context, *, image_paths: tuple[Path, ...] = ()) -> None:
         if not args:
             await message.reply_text("Usage: /agent <text>")
             return
-        await self._send_to_agent(args, message, context)
+        await self._send_to_agent(args, message, context, image_paths=image_paths)
 
     async def _cmd_agents(self, args: str, message, context) -> None:
         lines = [
@@ -523,11 +552,11 @@ class TelegramBridgeBot:
 
     async def _cmd_stream(self, args: str, message, context) -> None:
         self.settings.agent_output_mode = AgentOutputMode.STREAM
-        await message.reply_text("Agent output streaming enabled.")
+        await message.reply_text("Editable 60-line progress output enabled.")
 
     async def _cmd_final(self, args: str, message, context) -> None:
         self.settings.agent_output_mode = AgentOutputMode.FINAL
-        await message.reply_text("Agent output final-only mode enabled.")
+        await message.reply_text("Editable 60-line progress output enabled.")
 
     async def _cmd_trace_on(self, args: str, message, context) -> None:
         self.settings.suppress_agent_trace_lines = False
@@ -544,7 +573,7 @@ class TelegramBridgeBot:
         await self._handle_approval("reject", message, context)
 
     async def _cmd_voice_approve(self, args: str, message, context) -> None:
-        pending = self.state.active_pending_action("voice_transcript")
+        pending = self.state.active_pending_action("voice_transcript", chat_id=message.chat_id)
         if pending is None:
             await message.reply_text("No voice transcript is pending.")
             return
@@ -558,19 +587,21 @@ class TelegramBridgeBot:
         await message.reply_text("Transcript sent.")
 
     async def _cmd_voice_reject(self, args: str, message, context) -> None:
-        self.state.clear_pending_actions(kind="voice_transcript")
+        self.state.clear_pending_actions(kind="voice_transcript", chat_id=message.chat_id)
         await message.reply_text("Transcript discarded.")
 
     async def _cmd_voice_edit(self, args: str, message, context) -> None:
         if not args:
             await message.reply_text("Usage: /voice_edit <text>")
             return
-        self.state.clear_pending_actions(kind="voice_transcript")
-        self.state.add_pending_action(pending_voice_action_from_transcript(args))
+        self.state.clear_pending_actions(kind="voice_transcript", chat_id=message.chat_id)
+        self.state.add_pending_action(
+            pending_voice_action_from_transcript(args, chat_id=message.chat_id)
+        )
         await message.reply_text("Transcript updated. Use /voice_approve to send it.")
 
     async def _maybe_handle_voice_correction(self, text: str, message) -> bool:
-        pending = self.state.active_pending_action("voice_transcript")
+        pending = self.state.active_pending_action("voice_transcript", chat_id=message.chat_id)
         if pending is None:
             return False
         if parse_command(text) is not None:
@@ -625,8 +656,10 @@ class TelegramBridgeBot:
                 await message.reply_text(f"Voice transcription failed: {exc}")
                 return
 
-            self.state.clear_pending_actions(kind="voice_transcript")
-            self.state.add_pending_action(pending_voice_action_from_transcript(transcript))
+            self.state.clear_pending_actions(kind="voice_transcript", chat_id=message.chat_id)
+            self.state.add_pending_action(
+                pending_voice_action_from_transcript(transcript, chat_id=message.chat_id)
+            )
             await self._send_voice_confirmation(message, transcript)
         finally:
             if stop_typing:
@@ -653,7 +686,7 @@ class TelegramBridgeBot:
     async def _send_voice_confirmation(self, message, transcript: str) -> None:
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        pending = self.state.active_pending_action("voice_transcript")
+        pending = self.state.active_pending_action("voice_transcript", chat_id=message.chat_id)
         assert pending is not None
         keyboard = InlineKeyboardMarkup(
             [
@@ -671,7 +704,15 @@ class TelegramBridgeBot:
         if sent is not None:
             pending.message_id = getattr(sent, "message_id", None)
 
-    async def _send_to_agent(self, text: str, message, context) -> None:
+    async def _send_to_agent(
+        self,
+        text: str,
+        message,
+        context,
+        *,
+        image_paths: tuple[Path, ...] = (),
+        preserve_leading_slash: bool = False,
+    ) -> None:
         self._start_typing(context.bot, message.chat_id)
         try:
             await self._send_to_agent_text(
@@ -679,6 +720,8 @@ class TelegramBridgeBot:
                 chat_id=message.chat_id,
                 application=getattr(context, "application", None),
                 bot=getattr(context, "bot", None),
+                image_paths=image_paths,
+                preserve_leading_slash=preserve_leading_slash,
             )
         except RuntimeError as exc:
             self._stop_typing(message.chat_id)
@@ -694,6 +737,8 @@ class TelegramBridgeBot:
         chat_id: int | None = None,
         application=None,
         bot=None,
+        image_paths: tuple[Path, ...] = (),
+        preserve_leading_slash: bool = False,
     ) -> None:
         agent = self.state.active_agent
         if agent is None or not agent.is_running:
@@ -706,16 +751,17 @@ class TelegramBridgeBot:
             agent = self.state.active_agent
             if agent is None or not agent.is_running:
                 raise RuntimeError("Agent is not running.")
-        user_text = self._agent_user_text(text)
+        prompt_text = self._prompt_text_with_images(text, image_paths=image_paths)
+        user_text = prompt_text if preserve_leading_slash else self._agent_user_text(prompt_text)
         if chat_id is not None:
             self._interactive_output_chats.add(chat_id)
             self._screenshot_watch_since_by_chat[chat_id] = time.time()
-            self._remember_agent_input_echo(chat_id, text)
+            self._remember_agent_input_echo(chat_id, prompt_text)
             self._remember_agent_input_echo(chat_id, user_text)
         await agent.send_text(user_text)
 
     async def _handle_approval(self, decision: ApprovalDecision, message, context) -> None:
-        pending = self.state.active_pending_action("approval")
+        pending = self.state.active_pending_action("approval", chat_id=message.chat_id)
         if pending is None:
             await message.reply_text("No approval is pending.")
             return
@@ -802,10 +848,26 @@ class TelegramBridgeBot:
                 text="Reply with the corrected transcript text.",
             )
 
+    async def _handle_pending_choice_callback(
+        self,
+        action: PendingAction,
+        choice_id: str,
+        query,
+        context,
+    ) -> None:
+        choice = action.choice(choice_id)
+        if choice is None:
+            await query.edit_message_text("This action choice is no longer valid.")
+            return
+        try:
+            await self._apply_choice_action(action, choice)
+        except RuntimeError as exc:
+            await query.edit_message_text(str(exc))
+            return
+        await query.edit_message_text(f"Sent option: {choice.label}")
+
     async def _flush_agent_output(self, bot, chat_id: int, session: AgentSession) -> None:
         pending_text = ""
-        first_output_at: float | None = None
-        last_output_at: float | None = None
         interval = self.settings.output_flush_interval_ms / 1000
         while self.state.active_agent is session and session.is_running:
             try:
@@ -824,84 +886,65 @@ class TelegramBridgeBot:
                         final_text = self._select_complete_output(buffered_text, final_text)
                     self._record_session_event(session, event)
                     await self._maybe_update_dashboard(bot, chat_id, session, force=True)
-                    await self._send_agent_output(bot, chat_id, final_text, complete_request=True)
+                    await self._send_agent_output(
+                        bot,
+                        chat_id,
+                        final_text,
+                        complete_request=True,
+                    )
                     self._stop_typing(chat_id)
                     pending_text = ""
-                    first_output_at = None
-                    last_output_at = None
                     continue
                 await self._handle_agent_event(bot, chat_id, session, event)
+                if (
+                    event.kind == AgentEventKind.TURN_COMPLETED
+                    and pending_text
+                    and not self._approval_pending(chat_id)
+                ):
+                    final_text = prepare_agent_output(
+                        pending_text,
+                        suppress_trace_lines=self.settings.suppress_agent_trace_lines,
+                    )
+                    final_text = self._suppress_agent_input_echoes(chat_id, final_text)
+                    await self._send_agent_output(
+                        bot,
+                        chat_id,
+                        final_text,
+                        complete_request=True,
+                    )
+                    self._stop_typing(chat_id)
+                    pending_text = ""
                 if event.kind in {AgentEventKind.TURN_COMPLETED, AgentEventKind.TURN_FAILED, AgentEventKind.ERROR}:
-                    if not self._approval_pending():
+                    if not self._approval_pending(chat_id):
                         self._interactive_output_chats.discard(chat_id)
                 if event.kind != AgentEventKind.ASSISTANT_DELTA:
                     await self._maybe_update_dashboard(bot, chat_id, session)
                     continue
-                progress_text = sanitize_terminal_text(event.text)
-                progress_text = self._suppress_agent_input_echoes(chat_id, progress_text)
-                await self._update_terminal_progress(bot, chat_id, progress_text)
                 if session.replaces_output_snapshots:
                     pending_text = event.text
                 else:
                     pending_text += event.text
-                now = asyncio.get_running_loop().time()
-                first_output_at = first_output_at or now
-                last_output_at = now
+                progress_text = self._prepare_progress_delta(event.text)
+                progress_text = self._suppress_agent_input_echoes(chat_id, progress_text)
+                if progress_text.strip() and not self._approval_pending(chat_id):
+                    await self._update_terminal_progress(bot, chat_id, progress_text)
                 await self._maybe_emit_fallback_approval(bot, chat_id, session)
             except asyncio.TimeoutError:
                 pass
             await self._send_new_screenshots(bot, chat_id)
             await self._maybe_update_dashboard(bot, chat_id, session)
-            if not pending_text:
-                continue
-            if self.settings.agent_output_mode == AgentOutputMode.STREAM:
-                if len(pending_text) < self.settings.max_telegram_chunk_chars and not session.output_queue.empty():
-                    continue
-                if self._approval_pending():
-                    continue
-                if not agent_output_in_progress(pending_text):
-                    stream_text = prepare_agent_output(
-                        pending_text,
-                        suppress_trace_lines=self.settings.suppress_agent_trace_lines,
-                    )
-                    stream_text = self._suppress_agent_input_echoes(chat_id, stream_text)
-                    await self._send_agent_output(bot, chat_id, stream_text)
-                pending_text = ""
-                first_output_at = None
-                last_output_at = None
-                continue
-
-            loop_now = asyncio.get_running_loop().time()
-            idle_seconds = self.settings.final_output_idle_ms / 1000
-            max_wait_seconds = self.settings.final_output_max_wait_ms / 1000
-            idle = last_output_at is not None and loop_now - last_output_at >= idle_seconds
-            waited = first_output_at is not None and loop_now - first_output_at >= max_wait_seconds
-            if idle or waited:
-                if agent_output_in_progress(pending_text):
-                    if waited:
-                        first_output_at = loop_now
-                    continue
-                if self._approval_pending():
-                    if waited:
-                        first_output_at = loop_now
-                    continue
-                final_text = prepare_agent_output(
-                    pending_text,
-                    suppress_trace_lines=self.settings.suppress_agent_trace_lines,
-                )
-                final_text = self._suppress_agent_input_echoes(chat_id, final_text)
-                await self._send_agent_output(bot, chat_id, final_text, complete_request=True)
-                self._stop_typing(chat_id)
-                pending_text = ""
-                first_output_at = None
-                last_output_at = None
         if pending_text:
             final_text = prepare_agent_output(
                 pending_text,
                 suppress_trace_lines=self.settings.suppress_agent_trace_lines,
             )
             final_text = self._suppress_agent_input_echoes(chat_id, final_text)
-            await self._send_agent_output(bot, chat_id, final_text, complete_request=True)
+            await self._send_agent_output(
+                bot,
+                chat_id,
+                final_text,
+                complete_request=True,
+            )
             self._stop_typing(chat_id)
 
     async def _handle_agent_event(
@@ -915,6 +958,9 @@ class TelegramBridgeBot:
             return
         if event.kind == AgentEventKind.APPROVAL_REQUESTED:
             await self._send_approval_event(bot, chat_id, session, event)
+            return
+        if event.kind == AgentEventKind.CHOICE_REQUEST:
+            await self._send_choice_request_event(bot, chat_id, session, event)
             return
         if event.kind in {AgentEventKind.ERROR, AgentEventKind.TURN_FAILED, AgentEventKind.TOOL_FAILED}:
             await self._safe_send_message(
@@ -946,10 +992,10 @@ class TelegramBridgeBot:
             return
         recent_output = session.recent_output(4000)
         if has_auto_approval_marker(recent_output):
-            self.state.clear_pending_actions(kind="approval")
+            self.state.clear_pending_actions(kind="approval", chat_id=chat_id)
             self._last_approval_signature = None
             return
-        current = self.state.active_pending_action("approval")
+        current = self.state.active_pending_action("approval", chat_id=chat_id)
         if current is not None:
             return
         pending = detect_pending_approval(recent_output, session.adapter)
@@ -977,10 +1023,11 @@ class TelegramBridgeBot:
         event: AgentEvent,
     ) -> None:
         prompt = safe_excerpt(event.text or event.display_text(), 1200)
-        if self.state.active_pending_action("approval", session_id=event.session_id) is not None:
+        if self.state.active_pending_action("approval", session_id=event.session_id, chat_id=chat_id) is not None:
             return
         action = pending_approval_action(
             session_id=event.session_id or session.adapter.id,
+            chat_id=chat_id,
             source_event_id=event.event_id,
             prompt=prompt,
             data=event.data,
@@ -1005,6 +1052,69 @@ class TelegramBridgeBot:
             chat_id=chat_id,
             text=f"Approval required:\n{prompt}",
             reply_markup=keyboard,
+        )
+        self._stop_typing(chat_id)
+        if sent is not None:
+            action.message_id = sent.message_id
+
+    async def _send_choice_request_event(
+        self,
+        bot,
+        chat_id: int,
+        session: AgentSession,
+        event: AgentEvent,
+    ) -> None:
+        raw_choices = event.data.get("choices")
+        if not isinstance(raw_choices, list):
+            return
+        choices: list[PendingActionChoice] = []
+        option_lines: list[str] = []
+        for index, raw_choice in enumerate(raw_choices, start=1):
+            if not isinstance(raw_choice, dict):
+                continue
+            label = str(raw_choice.get("label") or raw_choice.get("text") or "").strip()
+            if not label:
+                continue
+            choice_id = str(raw_choice.get("id") or index)
+            value = str(raw_choice.get("value") or choice_id)
+            choices.append(PendingActionChoice(id=choice_id, label=label, value=value))
+            option_lines.append(f"{index}. {label}")
+        if not choices:
+            return
+        prompt = safe_excerpt(event.text or event.display_text(), 1200)
+        signature = f"{prompt}\n" + "\n".join(option_lines)
+        if signature == self._last_choice_signature:
+            return
+        self._last_choice_signature = signature
+        self.state.clear_pending_actions(kind="choice_request", chat_id=chat_id)
+        action = pending_action(
+            kind="choice_request",
+            session_id=event.session_id or session.adapter.id,
+            chat_id=chat_id,
+            source_event_id=event.event_id,
+            choices=tuple(choices),
+            data={"prompt": prompt},
+        )
+        self.state.add_pending_action(action)
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        keyboard_rows = []
+        current_row = []
+        for index, choice in enumerate(choices, start=1):
+            current_row.append(
+                InlineKeyboardButton(str(index), callback_data=f"cc:{action.id}:{choice.id}")
+            )
+            if len(current_row) == 4:
+                keyboard_rows.append(current_row)
+                current_row = []
+        if current_row:
+            keyboard_rows.append(current_row)
+        text = f"{prompt}\n\n" + "\n".join(option_lines) + "\n\nReply with a number."
+        sent = await self._safe_send_message(
+            bot,
+            chat_id=chat_id,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(keyboard_rows),
         )
         self._stop_typing(chat_id)
         if sent is not None:
@@ -1143,12 +1253,12 @@ class TelegramBridgeBot:
                     chat_id=chat_id,
                     text=f"Screenshot detected, but sending failed: {error}",
                 )
-        if complete_request:
-            if await self._publish_complete_output(bot, chat_id, text):
-                self._interactive_output_chats.discard(chat_id)
-                return
-        for chunk in chunk_text(text, self.settings.max_telegram_chunk_chars):
-            await self._safe_send_message(bot, chat_id=chat_id, text=chunk)
+        if not complete_request:
+            await self._update_terminal_progress(bot, chat_id, sanitize_terminal_text(text))
+            return
+        if await self._publish_complete_output(bot, chat_id, text):
+            self._interactive_output_chats.discard(chat_id)
+            return
         if complete_request:
             self._clear_terminal_progress(chat_id)
             self._interactive_output_chats.discard(chat_id)
@@ -1174,41 +1284,113 @@ class TelegramBridgeBot:
         chat_id: int,
         state: _TerminalProgressState,
     ) -> None:
-        text = "\n".join(state.lines[-TERMINAL_PROGRESS_PAGE_LINES:]).strip()
+        text = _fit_progress_text(state.lines[-TERMINAL_PROGRESS_PAGE_LINES:])
         if not text:
             return
-        if len(text) > self.settings.max_telegram_chunk_chars:
-            text = text[-self.settings.max_telegram_chunk_chars :]
-        state.published_line_count = state.completed_line_count
         if state.message_id is None:
+            self._log_agent_output(
+                "progress_send_attempt",
+                chat_id,
+                chars=len(text),
+                completed=state.completed_line_count,
+                lines=len(state.lines[-TERMINAL_PROGRESS_PAGE_LINES:]),
+            )
             sent = await self._safe_send_message(bot, chat_id=chat_id, text=text)
             if sent is not None:
                 state.message_id = sent.message_id
+                state.published_line_count = state.completed_line_count
+                self._log_agent_output(
+                    "progress_send_ok",
+                    chat_id,
+                    message_id=state.message_id,
+                    completed=state.completed_line_count,
+                    published=state.published_line_count,
+                )
+            else:
+                self._log_agent_output("progress_send_failed", chat_id)
             return
         edit_message_text = getattr(bot, "edit_message_text", None)
         if edit_message_text is None:
+            self._log_agent_output(
+                "progress_edit_unavailable",
+                chat_id,
+                message_id=state.message_id,
+            )
             return
         try:
+            self._log_agent_output(
+                "progress_edit_attempt",
+                chat_id,
+                message_id=state.message_id,
+                chars=len(text),
+                completed=state.completed_line_count,
+                lines=len(state.lines[-TERMINAL_PROGRESS_PAGE_LINES:]),
+            )
             await edit_message_text(chat_id=chat_id, message_id=state.message_id, text=text)
+            state.published_line_count = state.completed_line_count
+            self._log_agent_output(
+                "progress_edit_ok",
+                chat_id,
+                message_id=state.message_id,
+                completed=state.completed_line_count,
+                published=state.published_line_count,
+            )
         except Exception as exc:  # noqa: BLE001 - Telegram edit failures should not crash bridge
+            self._log_agent_output(
+                "progress_edit_failed",
+                chat_id,
+                message_id=state.message_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
             print(f"telegram terminal progress edit failed: {exc}", flush=True)
 
     async def _publish_complete_output(self, bot, chat_id: int, text: str) -> bool:
         lines = sanitize_terminal_text(text).splitlines()
         if not lines and text.strip():
             lines = [text.strip()]
+        state = self._terminal_progress_by_chat.setdefault(chat_id, _TerminalProgressState())
+        progress_lines = list(state.lines)
+        if state.partial_line.strip():
+            progress_lines.append(state.partial_line.rstrip("\r\n"))
+        lines = self._select_complete_lines(progress_lines, lines)
         if not lines:
             return False
-        state = self._terminal_progress_by_chat.setdefault(chat_id, _TerminalProgressState())
         state.lines = lines[-TERMINAL_PROGRESS_PAGE_LINES:]
         state.partial_line = ""
         state.completed_line_count = len(lines)
         state.published_line_count = len(lines)
+        self._log_agent_output(
+            "complete_publish",
+            chat_id,
+            message_id=state.message_id,
+            source_lines=len(lines),
+            visible_lines=len(state.lines),
+        )
         await self._publish_terminal_progress_page(bot, chat_id, state)
         return True
 
     def _clear_terminal_progress(self, chat_id: int) -> None:
         self._terminal_progress_by_chat.pop(chat_id, None)
+
+    def _prepare_progress_delta(self, text: str) -> str:
+        prepared = prepare_agent_output(
+            text,
+            suppress_trace_lines=self.settings.suppress_agent_trace_lines,
+        )
+        if not prepared.strip():
+            return ""
+        if text.endswith(("\n", "\r")) and not prepared.endswith(("\n", "\r")):
+            return f"{prepared}\n"
+        return prepared
+
+    def _log_agent_output(self, action: str, chat_id: int, **fields) -> None:
+        parts = [f"action={action}", f"chat_id={chat_id}"]
+        for key, value in fields.items():
+            if value is None:
+                continue
+            rendered = str(value).replace("\n", "\\n")
+            parts.append(f"{key}={rendered}")
+        print("clicourier agent_output " + " ".join(parts), flush=True)
 
     async def _send_latest_screenshot(self, bot, chat_id: int) -> bool:
         try:
@@ -1285,17 +1467,26 @@ class TelegramBridgeBot:
                 )
 
     async def _maybe_handle_choice_reply(self, text: str, message, context) -> bool:
-        pending = self.state.active_pending_action("choice_request")
+        pending = self.state.active_pending_action("choice_request", chat_id=message.chat_id)
         if pending is None:
             return False
         stripped = text.strip()
         if not stripped.isdigit():
             return False
-        await message.reply_text("Choice replies are only accepted for explicit CliCourier prompts.")
+        await self._apply_choice(int(stripped), message, context)
         return True
 
     async def _apply_choice(self, number: int, message, context) -> None:
-        await message.reply_text("No choice is pending.")
+        pending = self.state.active_pending_action("choice_request", chat_id=message.chat_id)
+        if pending is None:
+            await message.reply_text("No choice is pending.")
+            return
+        if number < 1 or number > len(pending.choices):
+            await message.reply_text(f"Valid options: 1-{len(pending.choices)}.")
+            return
+        choice = pending.choices[number - 1]
+        await self._apply_choice_action(pending, choice)
+        await message.reply_text(f"Sent option {number}: {choice.label}")
 
     async def _reply_chunks(self, message, text: str) -> None:
         for chunk in chunk_text(text, self.settings.max_telegram_chunk_chars):
@@ -1321,8 +1512,8 @@ class TelegramBridgeBot:
     def _chat_notifications_suppressed(self, chat_id: int) -> bool:
         return self._notifications_muted() and chat_id not in self._interactive_output_chats
 
-    def _approval_pending(self) -> bool:
-        return self.state.active_pending_action("approval") is not None
+    def _approval_pending(self, chat_id: int | None = None) -> bool:
+        return self.state.active_pending_action("approval", chat_id=chat_id) is not None
 
     def _agent_initial_prompt(self) -> str:
         prompt = " ".join(self.settings.agent_initial_prompt.split())
@@ -1349,6 +1540,78 @@ class TelegramBridgeBot:
             return text
         self._agent_context_sent = True
         return f"{self._agent_initial_prompt()}\n\nUser request:\n{text}"
+
+    def _prompt_text_with_images(self, text: str, *, image_paths: tuple[Path, ...] = ()) -> str:
+        cleaned = text.strip()
+        if not image_paths:
+            return cleaned
+        lines = [cleaned, "", "Attached image files from the bridge (including WhatsApp media):"]
+        lines.extend(
+            f"- {self.sandbox.display_path(path)}"
+            for path in image_paths
+        )
+        lines.append("Inspect those local image files as part of this request.")
+        return "\n".join(line for line in lines if line is not None).strip()
+
+    def _message_text(self, message) -> str | None:
+        text = getattr(message, "text", None)
+        if text is not None:
+            text = text.strip()
+            if text:
+                return text
+        caption = getattr(message, "caption", None)
+        if caption is None:
+            return None
+        caption = caption.strip()
+        return caption or None
+
+    async def _download_prompt_images(self, message, context) -> tuple[Path, ...] | None:
+        attachments = self._image_attachments(message)
+        if not attachments:
+            return ()
+        paths: list[Path] = []
+        for attachment, suffix in attachments:
+            file_size = getattr(attachment, "file_size", None)
+            if file_size and file_size > self.settings.screenshot_max_bytes:
+                await message.reply_text("Image is too large.")
+                return None
+            telegram_file = await context.bot.get_file(attachment.file_id)
+            target = self._prompt_image_path(
+                getattr(attachment, "file_unique_id", None) or attachment.file_id,
+                suffix,
+            )
+            await telegram_file.download_to_drive(custom_path=target)
+            if target.stat().st_size > self.settings.screenshot_max_bytes:
+                target.unlink(missing_ok=True)
+                await message.reply_text("Image is too large.")
+                return None
+            paths.append(target)
+        return tuple(paths)
+
+    def _image_attachments(self, message) -> list[tuple[object, str]]:
+        attachments: list[tuple[object, str]] = []
+        photos = getattr(message, "photo", None) or ()
+        if photos:
+            photo = photos[-1]
+            attachments.append((photo, ".jpg"))
+        document = getattr(message, "document", None)
+        if document is not None and _document_is_image(document):
+            attachments.append(
+                (
+                    document,
+                    _image_suffix(
+                        getattr(document, "file_name", None),
+                        getattr(document, "mime_type", None),
+                    ),
+                )
+            )
+        return attachments
+
+    def _prompt_image_path(self, file_unique_id: str, suffix: str) -> Path:
+        target_dir = self.settings.workspace_root / ".clicourier" / "incoming-media"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = int(time.time() * 1000)
+        return target_dir / f"{timestamp}-{file_unique_id}{suffix}"
 
     def _remember_agent_input_echo(self, chat_id: int, text: str) -> None:
         normalized = normalize_echo_text(text)
@@ -1412,6 +1675,22 @@ class TelegramBridgeBot:
         if callable(record):
             record(event)
 
+    async def _apply_choice_action(self, action: PendingAction, choice: PendingActionChoice) -> None:
+        agent = self.state.active_agent
+        if agent is None:
+            raise RuntimeError("Agent is not running.")
+        value = choice.value or choice.label
+        send_choice = getattr(agent, "send_choice", None)
+        if callable(send_choice):
+            await send_choice(value)
+        else:
+            send_approval = getattr(agent, "send_approval", None)
+            if callable(send_approval):
+                await send_approval(value)
+            else:
+                await agent.send_text(value)
+        self.state.clear_pending_action(action.id)
+
     def _select_complete_output(self, buffered_text: str, final_text: str) -> str:
         buffered = buffered_text.strip()
         final = final_text.strip()
@@ -1423,7 +1702,48 @@ class TelegramBridgeBot:
             return final
         if len(buffered) > len(final) and (buffered.endswith(final) or final in buffered):
             return buffered
+        buffered_lines = [line for line in buffered.splitlines() if line.strip()]
+        final_lines = [line for line in final.splitlines() if line.strip()]
+        if self._final_is_shortened_tail(buffered_lines, final_lines):
+            return buffered
         return final
+
+    def _select_complete_lines(
+        self,
+        progress_lines: list[str],
+        final_lines: list[str],
+    ) -> list[str]:
+        if not progress_lines:
+            return final_lines
+        if not final_lines:
+            return progress_lines
+        progress_text = "\n".join(progress_lines).strip()
+        final_text = "\n".join(final_lines).strip()
+        if not progress_text:
+            return final_lines
+        if not final_text:
+            return progress_lines
+        if progress_text == final_text:
+            return final_lines
+        if len(progress_lines) > len(final_lines) and (
+            progress_text.endswith(final_text) or final_text in progress_text
+        ):
+            return progress_lines
+        if self._final_is_shortened_tail(progress_lines, final_lines):
+            return progress_lines
+        return final_lines
+
+    def _final_is_shortened_tail(
+        self,
+        buffered_lines: list[str],
+        final_lines: list[str],
+    ) -> bool:
+        if len(buffered_lines) < 2 or not final_lines or len(final_lines) >= len(buffered_lines):
+            return False
+        tail = buffered_lines[-len(final_lines):]
+        if tail == final_lines:
+            return True
+        return buffered_lines[-1].strip() == final_lines[-1].strip()
 
 
 def approval_decision_from_reactions(reactions) -> ApprovalDecision | None:
@@ -1452,6 +1772,10 @@ def _echo_matches(line: str, echo: str) -> bool:
     return False
 
 
+def _fit_progress_text(lines: list[str], *, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
+    return render_progress(lines, limit=limit)
+
+
 AUDIO_DOCUMENT_EXTENSIONS = {".oga", ".ogg", ".opus", ".mp3", ".m4a", ".wav", ".webm"}
 AUDIO_MIME_SUFFIXES = {
     "audio/ogg": ".oga",
@@ -1461,6 +1785,12 @@ AUDIO_MIME_SUFFIXES = {
     "audio/x-m4a": ".m4a",
     "audio/wav": ".wav",
     "audio/webm": ".webm",
+}
+IMAGE_DOCUMENT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+IMAGE_MIME_SUFFIXES = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
 }
 
 
@@ -1484,6 +1814,28 @@ def _audio_suffix(file_name: str | None, mime_type: str | None) -> str:
         if suffix is not None:
             return suffix
     return ".oga"
+
+
+def _document_is_image(document) -> bool:
+    mime_type = (getattr(document, "mime_type", None) or "").lower()
+    if mime_type.startswith("image/"):
+        return True
+    file_name = getattr(document, "file_name", None)
+    if not file_name:
+        return False
+    return Path(file_name).suffix.lower() in IMAGE_DOCUMENT_EXTENSIONS
+
+
+def _image_suffix(file_name: str | None, mime_type: str | None) -> str:
+    if file_name:
+        suffix = Path(file_name).suffix.lower()
+        if suffix in IMAGE_DOCUMENT_EXTENSIONS:
+            return suffix
+    if mime_type:
+        suffix = IMAGE_MIME_SUFFIXES.get(mime_type.lower())
+        if suffix is not None:
+            return suffix
+    return ".jpg"
 
 
 SCREENSHOT_SUMMARY_RE = re.compile(

@@ -97,7 +97,7 @@ def codex_payload_to_event(
         )
     if normalized_type in {"agent_message", "assistant_message", "final_message", "final_answer"}:
         return AgentEvent(
-            kind=AgentEventKind.FINAL_MESSAGE,
+            kind=_assistant_message_kind(payload, normalized_type=normalized_type),
             text=_text(payload),
             session_id=session_id,
             turn_id=turn_id,
@@ -122,6 +122,8 @@ def codex_payload_to_event(
         return _tool_event(AgentEventKind.TOOL_FAILED, payload, session_id=session_id, turn_id=turn_id)
     if normalized_type in {"approval_requested", "approval_request"}:
         return _approval_event(payload, session_id=session_id, turn_id=turn_id)
+    if normalized_type in {"choice_request", "choice_requested", "selection_request", "selection_requested"}:
+        return _choice_event(payload, session_id=session_id, turn_id=turn_id)
     if normalized_type in {"approval_resolved", "approval_decision"}:
         return AgentEvent(
             kind=AgentEventKind.APPROVAL_RESOLVED,
@@ -192,7 +194,7 @@ def _response_item_to_event(
     merged = {**payload, **item, "item": item}
     if item_type in {"message", "assistant_message"} and item.get("role") == "assistant":
         return AgentEvent(
-            kind=AgentEventKind.FINAL_MESSAGE,
+            kind=_assistant_message_kind(merged, normalized_type=item_type),
             text=_text(merged),
             session_id=session_id,
             turn_id=turn_id,
@@ -264,12 +266,40 @@ def _approval_event(
     )
 
 
+def _choice_event(
+    payload: dict[str, Any],
+    *,
+    session_id: str | None,
+    turn_id: str | None,
+) -> AgentEvent:
+    prompt = _first_str(payload, "prompt", "title")
+    text = _text(payload)
+    if _looks_like_prompt_placeholder(text):
+        text = ""
+    return AgentEvent(
+        kind=AgentEventKind.CHOICE_REQUEST,
+        text=prompt or text or "Select an option.",
+        session_id=session_id,
+        turn_id=turn_id,
+        data={**payload, "choices": _normalize_choices(payload.get("choices"))},
+    )
+
+
 def _event_type(payload: dict[str, Any]) -> str:
     for key in ("type", "event", "event_type", "name"):
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
     return "status"
+
+
+def _assistant_message_kind(payload: dict[str, Any], *, normalized_type: str) -> AgentEventKind:
+    if normalized_type in {"final_message", "final_answer"}:
+        return AgentEventKind.FINAL_MESSAGE
+    channel = _normalize_type(_first_str(payload, "channel", "stream") or "")
+    if channel in {"commentary", "comment", "progress"}:
+        return AgentEventKind.ASSISTANT_DELTA
+    return AgentEventKind.FINAL_MESSAGE
 
 
 def _normalize_type(value: str) -> str:
@@ -325,3 +355,39 @@ def _stringify_text_value(value: Any) -> str:
             return _stringify_text_value(value["summary"])
     return ""
 
+
+def _normalize_choices(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    for index, item in enumerate(value, start=1):
+        if isinstance(item, str):
+            label = item.strip()
+            if not label:
+                continue
+            normalized.append({"id": str(index), "label": label, "value": str(index)})
+            continue
+        if not isinstance(item, dict):
+            continue
+        label = _stringify_text_value(item.get("label")) or _stringify_text_value(item.get("text"))
+        value_text = _stringify_text_value(item.get("value"))
+        choice_id = _stringify_text_value(item.get("id")) or str(index)
+        if not label and value_text:
+            label = value_text
+        if not label:
+            continue
+        normalized.append(
+            {
+                "id": choice_id,
+                "label": label,
+                "value": value_text or choice_id,
+            }
+        )
+    return normalized
+
+
+def _looks_like_prompt_placeholder(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    return stripped in {"{{prompt}}", "{prompt}", "<prompt>", "[prompt]"}
