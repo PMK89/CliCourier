@@ -113,7 +113,10 @@ class ScreenshotService:
             raise ScreenshotError("SCREENSHOT_DIR escapes WORKSPACE_ROOT") from exc
 
     def _validate_artifact(self, path: Path) -> ScreenshotArtifact:
-        resolved = path.resolve(strict=True)
+        try:
+            resolved = path.resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise ScreenshotError("screenshot artifact does not exist") from exc
         if not self.allow_outside_workspace:
             try:
                 resolved.relative_to(self.workspace_root)

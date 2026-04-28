@@ -4,7 +4,6 @@ import asyncio
 import re
 import tempfile
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from cli_courier.agent.events import AgentEvent, AgentEventKind
@@ -37,7 +36,11 @@ from cli_courier.telegram_bot.commands import (
     ParsedCommand,
     parse_command,
 )
-from cli_courier.telegram_bot.dashboard import DashboardSnapshot, render_dashboard, render_progress
+from cli_courier.telegram_bot.dashboard import DashboardSnapshot, render_dashboard
+from cli_courier.telegram_bot.output_renderer import (
+    StreamingMessageRenderer,
+    TELEGRAM_SAFE_LIMIT,
+)
 from cli_courier.telegram_bot.router import RouteKind, route_text
 from cli_courier.voice import (
     DisabledTranscriber,
@@ -49,16 +52,7 @@ from cli_courier.voice import (
 )
 
 TERMINAL_PROGRESS_PAGE_LINES = 60
-TELEGRAM_TEXT_LIMIT = 4096
-
-
-@dataclass
-class _TerminalProgressState:
-    message_id: int | None = None
-    lines: list[str] = field(default_factory=list)
-    partial_line: str = ""
-    completed_line_count: int = 0
-    published_line_count: int = 0
+TELEGRAM_PROGRESS_SAFE_LIMIT = TELEGRAM_SAFE_LIMIT
 
 
 class TelegramBridgeBot:
@@ -87,7 +81,8 @@ class TelegramBridgeBot:
         self._agent_context_sent = False
         self._dashboard_message_ids: dict[int, int] = {}
         self._dashboard_last_update: dict[int, float] = {}
-        self._terminal_progress_by_chat: dict[int, _TerminalProgressState] = {}
+        self._dashboard_last_text: dict[int, str] = {}
+        self._terminal_progress_by_chat: dict[int, StreamingMessageRenderer] = {}
 
     def build_application(self):
         from telegram.ext import (
@@ -754,6 +749,7 @@ class TelegramBridgeBot:
         prompt_text = self._prompt_text_with_images(text, image_paths=image_paths)
         user_text = prompt_text if preserve_leading_slash else self._agent_user_text(prompt_text)
         if chat_id is not None:
+            self._clear_terminal_progress(chat_id)
             self._interactive_output_chats.add(chat_id)
             self._screenshot_watch_since_by_chat[chat_id] = time.time()
             self._remember_agent_input_echo(chat_id, prompt_text)
@@ -926,11 +922,15 @@ class TelegramBridgeBot:
                     pending_text += event.text
                 progress_text = self._prepare_progress_delta(event.text)
                 progress_text = self._suppress_agent_input_echoes(chat_id, progress_text)
+                await self._maybe_emit_terminal_choice_request(bot, chat_id, session, pending_text)
                 if progress_text.strip() and not self._approval_pending(chat_id):
-                    await self._update_terminal_progress(bot, chat_id, progress_text)
+                    if session.replaces_output_snapshots:
+                        await self._replace_terminal_progress(bot, chat_id, progress_text)
+                    else:
+                        await self._update_terminal_progress(bot, chat_id, progress_text)
                 await self._maybe_emit_fallback_approval(bot, chat_id, session)
             except asyncio.TimeoutError:
-                pass
+                await self._render_terminal_progress(bot, chat_id)
             await self._send_new_screenshots(bot, chat_id)
             await self._maybe_update_dashboard(bot, chat_id, session)
         if pending_text:
@@ -1072,16 +1072,19 @@ class TelegramBridgeBot:
         for index, raw_choice in enumerate(raw_choices, start=1):
             if not isinstance(raw_choice, dict):
                 continue
-            label = str(raw_choice.get("label") or raw_choice.get("text") or "").strip()
+            label = _clean_choice_text(raw_choice.get("label") or raw_choice.get("text"))
             if not label:
                 continue
-            choice_id = str(raw_choice.get("id") or index)
-            value = str(raw_choice.get("value") or choice_id)
+            choice_id = _clean_choice_text(raw_choice.get("id")) or str(index)
+            value = _clean_choice_text(raw_choice.get("value")) or choice_id
             choices.append(PendingActionChoice(id=choice_id, label=label, value=value))
-            option_lines.append(f"{index}. {label}")
+            option_lines.append(f"{len(choices)}. {label}")
         if not choices:
             return
-        prompt = safe_excerpt(event.text or event.display_text(), 1200)
+        prompt = _choice_prompt_text(event)
+        if prompt is None:
+            return
+        prompt = safe_excerpt(prompt, 1200)
         signature = f"{prompt}\n" + "\n".join(option_lines)
         if signature == self._last_choice_signature:
             return
@@ -1094,6 +1097,68 @@ class TelegramBridgeBot:
             source_event_id=event.event_id,
             choices=tuple(choices),
             data={"prompt": prompt},
+        )
+        self.state.add_pending_action(action)
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        keyboard_rows = []
+        current_row = []
+        for index, choice in enumerate(choices, start=1):
+            current_row.append(
+                InlineKeyboardButton(str(index), callback_data=f"cc:{action.id}:{choice.id}")
+            )
+            if len(current_row) == 4:
+                keyboard_rows.append(current_row)
+                current_row = []
+        if current_row:
+            keyboard_rows.append(current_row)
+        text = f"{prompt}\n\n" + "\n".join(option_lines) + "\n\nReply with a number."
+        sent = await self._safe_send_message(
+            bot,
+            chat_id=chat_id,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(keyboard_rows),
+        )
+        self._stop_typing(chat_id)
+        if sent is not None:
+            action.message_id = sent.message_id
+
+    async def _maybe_emit_terminal_choice_request(
+        self,
+        bot,
+        chat_id: int,
+        session: AgentSession,
+        text: str,
+    ) -> None:
+        if self._chat_notifications_suppressed(chat_id):
+            return
+        if session.backend == "structured":
+            return
+        detected = detect_interactive_choices(text)
+        if detected is None:
+            return
+        prompt, labels, selected_index = detected
+        choices = tuple(
+            PendingActionChoice(id=str(index), label=label, value=str(index))
+            for index, label in enumerate(labels, start=1)
+        )
+        option_lines = [f"{index}. {label}" for index, label in enumerate(labels, start=1)]
+        signature = f"terminal:{selected_index}:{prompt}\n" + "\n".join(option_lines)
+        if signature == self._last_choice_signature:
+            return
+        self._last_choice_signature = signature
+        self.state.clear_pending_actions(kind="choice_request", chat_id=chat_id)
+        action = pending_action(
+            kind="choice_request",
+            session_id=session.adapter.id,
+            chat_id=chat_id,
+            source_event_id=None,
+            choices=choices,
+            data={
+                "prompt": prompt,
+                "input_mode": "terminal_navigation",
+                "selected_index": selected_index,
+            },
         )
         self.state.add_pending_action(action)
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -1220,6 +1285,10 @@ class TelegramBridgeBot:
             if sent is not None:
                 self._dashboard_message_ids[chat_id] = sent.message_id
                 self._dashboard_last_update[chat_id] = loop_now
+                self._dashboard_last_text[chat_id] = text
+            return
+        if self._dashboard_last_text.get(chat_id) == text:
+            self._dashboard_last_update[chat_id] = loop_now
             return
         edit_message_text = getattr(bot, "edit_message_text", None)
         if edit_message_text is None:
@@ -1227,7 +1296,12 @@ class TelegramBridgeBot:
         try:
             await edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
             self._dashboard_last_update[chat_id] = loop_now
+            self._dashboard_last_text[chat_id] = text
         except Exception as exc:  # noqa: BLE001 - Telegram edit failures should not crash bridge
+            if _is_telegram_message_not_modified(exc):
+                self._dashboard_last_update[chat_id] = loop_now
+                self._dashboard_last_text[chat_id] = text
+                return
             print(f"telegram dashboard edit failed: {exc}", flush=True)
 
     async def _send_agent_output(
@@ -1266,108 +1340,80 @@ class TelegramBridgeBot:
     async def _update_terminal_progress(self, bot, chat_id: int, text: str) -> None:
         if self._chat_notifications_suppressed(chat_id) or not text:
             return
-        state = self._terminal_progress_by_chat.setdefault(chat_id, _TerminalProgressState())
-        for segment in text.splitlines(keepends=True):
-            if segment.endswith(("\n", "\r")):
-                state.lines.append((state.partial_line + segment).rstrip("\r\n"))
-                state.completed_line_count += 1
-                del state.lines[:-TERMINAL_PROGRESS_PAGE_LINES]
-                state.partial_line = ""
-                if state.completed_line_count - state.published_line_count >= TERMINAL_PROGRESS_PAGE_LINES:
-                    await self._publish_terminal_progress_page(bot, chat_id, state)
-            else:
-                state.partial_line += segment
+        renderer = self._terminal_progress(chat_id)
+        if renderer.message_id is None:
+            await self._append_initial_terminal_progress(bot, renderer, text)
+            return
+        renderer.append_chunk(text)
+        await renderer.render(bot, running=True)
 
-    async def _publish_terminal_progress_page(
+    async def _append_initial_terminal_progress(
         self,
         bot,
-        chat_id: int,
-        state: _TerminalProgressState,
+        renderer: StreamingMessageRenderer,
+        text: str,
     ) -> None:
-        text = _fit_progress_text(state.lines[-TERMINAL_PROGRESS_PAGE_LINES:])
-        if not text:
+        segments = text.splitlines(keepends=True)
+        for index, segment in enumerate(segments):
+            renderer.append_chunk(segment)
+            if len(renderer.latest_lines()) >= TERMINAL_PROGRESS_PAGE_LINES:
+                await renderer.render(bot, running=True)
+                remainder = "".join(segments[index + 1 :])
+                if remainder:
+                    renderer.append_chunk(remainder)
+                    await renderer.render(bot, running=True)
+                return
+        await renderer.render(bot, running=True)
+
+    async def _render_terminal_progress(self, bot, chat_id: int) -> None:
+        renderer = self._terminal_progress_by_chat.get(chat_id)
+        if renderer is None:
             return
-        if state.message_id is None:
-            self._log_agent_output(
-                "progress_send_attempt",
-                chat_id,
-                chars=len(text),
-                completed=state.completed_line_count,
-                lines=len(state.lines[-TERMINAL_PROGRESS_PAGE_LINES:]),
-            )
-            sent = await self._safe_send_message(bot, chat_id=chat_id, text=text)
-            if sent is not None:
-                state.message_id = sent.message_id
-                state.published_line_count = state.completed_line_count
-                self._log_agent_output(
-                    "progress_send_ok",
-                    chat_id,
-                    message_id=state.message_id,
-                    completed=state.completed_line_count,
-                    published=state.published_line_count,
-                )
-            else:
-                self._log_agent_output("progress_send_failed", chat_id)
+        await renderer.render(bot, running=True)
+
+    async def _replace_terminal_progress(self, bot, chat_id: int, text: str) -> None:
+        lines = sanitize_terminal_text(text).splitlines()
+        if not lines and text.strip():
+            lines = [text.strip()]
+        if not lines:
             return
-        edit_message_text = getattr(bot, "edit_message_text", None)
-        if edit_message_text is None:
-            self._log_agent_output(
-                "progress_edit_unavailable",
-                chat_id,
-                message_id=state.message_id,
-            )
-            return
-        try:
-            self._log_agent_output(
-                "progress_edit_attempt",
-                chat_id,
-                message_id=state.message_id,
-                chars=len(text),
-                completed=state.completed_line_count,
-                lines=len(state.lines[-TERMINAL_PROGRESS_PAGE_LINES:]),
-            )
-            await edit_message_text(chat_id=chat_id, message_id=state.message_id, text=text)
-            state.published_line_count = state.completed_line_count
-            self._log_agent_output(
-                "progress_edit_ok",
-                chat_id,
-                message_id=state.message_id,
-                completed=state.completed_line_count,
-                published=state.published_line_count,
-            )
-        except Exception as exc:  # noqa: BLE001 - Telegram edit failures should not crash bridge
-            self._log_agent_output(
-                "progress_edit_failed",
-                chat_id,
-                message_id=state.message_id,
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            print(f"telegram terminal progress edit failed: {exc}", flush=True)
+        renderer = self._terminal_progress(chat_id)
+        renderer.replace_lines(lines)
+        await renderer.render(bot, running=True)
 
     async def _publish_complete_output(self, bot, chat_id: int, text: str) -> bool:
         lines = sanitize_terminal_text(text).splitlines()
         if not lines and text.strip():
             lines = [text.strip()]
-        state = self._terminal_progress_by_chat.setdefault(chat_id, _TerminalProgressState())
-        progress_lines = list(state.lines)
-        if state.partial_line.strip():
-            progress_lines.append(state.partial_line.rstrip("\r\n"))
+        renderer = self._terminal_progress(chat_id)
+        renderer.flush_partial()
+        progress_lines = renderer.latest_lines(include_partial=False)
         lines = self._select_complete_lines(progress_lines, lines)
         if not lines:
             return False
-        state.lines = lines[-TERMINAL_PROGRESS_PAGE_LINES:]
-        state.partial_line = ""
-        state.completed_line_count = len(lines)
-        state.published_line_count = len(lines)
+        renderer.replace_lines(lines)
         self._log_agent_output(
             "complete_publish",
             chat_id,
-            message_id=state.message_id,
+            message_id=renderer.message_id,
             source_lines=len(lines),
-            visible_lines=len(state.lines),
+            visible_lines=len(renderer.latest_lines()),
         )
-        await self._publish_terminal_progress_page(bot, chat_id, state)
+        await renderer.render(bot, running=False, force=True)
         return True
+
+    def _terminal_progress(self, chat_id: int) -> StreamingMessageRenderer:
+        renderer = self._terminal_progress_by_chat.get(chat_id)
+        if renderer is None:
+            renderer = StreamingMessageRenderer(
+                chat_id=chat_id,
+                max_lines=TERMINAL_PROGRESS_PAGE_LINES,
+                safe_char_limit=TELEGRAM_PROGRESS_SAFE_LIMIT,
+                min_edit_interval_seconds=self.settings.output_flush_interval_ms / 1000,
+                log=lambda action, **fields: self._log_agent_output(action, chat_id, **fields),
+            )
+            self._terminal_progress_by_chat[chat_id] = renderer
+        return renderer
 
     def _clear_terminal_progress(self, chat_id: int) -> None:
         self._terminal_progress_by_chat.pop(chat_id, None)
@@ -1546,10 +1592,9 @@ class TelegramBridgeBot:
         if not image_paths:
             return cleaned
         lines = [cleaned, "", "Attached image files from the bridge (including WhatsApp media):"]
-        lines.extend(
-            f"- {self.sandbox.display_path(path)}"
-            for path in image_paths
-        )
+        for path in image_paths:
+            resolved = path.resolve()
+            lines.append(f"- {resolved} (workspace path: {self.sandbox.display_path(path)})")
         lines.append("Inspect those local image files as part of this request.")
         return "\n".join(line for line in lines if line is not None).strip()
 
@@ -1628,10 +1673,13 @@ class TelegramBridgeBot:
             return text
         lines = []
         for line in text.splitlines():
-            normalized = normalize_echo_text(line)
-            if normalized and any(_echo_matches(normalized, echo) for echo in echoes):
+            cleaned = _strip_agent_input_echo_prefixes(line, echoes)
+            normalized = normalize_echo_text(cleaned)
+            if not normalized:
                 continue
-            lines.append(line)
+            if any(_echo_matches(normalized, echo) for echo in echoes):
+                continue
+            lines.append(cleaned)
         return "\n".join(lines).strip()
 
     def _start_typing(self, bot, chat_id: int) -> None:
@@ -1679,7 +1727,10 @@ class TelegramBridgeBot:
         agent = self.state.active_agent
         if agent is None:
             raise RuntimeError("Agent is not running.")
-        value = choice.value or choice.label
+        if action.data.get("input_mode") == "terminal_navigation":
+            await self._apply_terminal_choice_action(action, choice)
+            return
+        value = choice.value or choice.id or choice.label
         send_choice = getattr(agent, "send_choice", None)
         if callable(send_choice):
             await send_choice(value)
@@ -1689,6 +1740,30 @@ class TelegramBridgeBot:
                 await send_approval(value)
             else:
                 await agent.send_text(value)
+        self.state.clear_pending_action(action.id)
+
+    async def _apply_terminal_choice_action(
+        self,
+        action: PendingAction,
+        choice: PendingActionChoice,
+    ) -> None:
+        agent = self.state.active_agent
+        if agent is None:
+            raise RuntimeError("Agent is not running.")
+        try:
+            target_index = int(choice.value or choice.id) - 1
+            selected_index = int(action.data.get("selected_index", 0))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("Choice is no longer valid.") from exc
+        if target_index < 0 or target_index >= len(action.choices):
+            raise RuntimeError("Choice is no longer valid.")
+        send_key = getattr(agent, "send_key", None)
+        if not callable(send_key):
+            raise RuntimeError("Agent does not support terminal menu navigation.")
+        direction = "Down" if target_index >= selected_index else "Up"
+        for _ in range(abs(target_index - selected_index)):
+            await send_key(direction)
+        await send_key("Enter")
         self.state.clear_pending_action(action.id)
 
     def _select_complete_output(self, buffered_text: str, final_text: str) -> str:
@@ -1755,8 +1830,108 @@ def approval_decision_from_reactions(reactions) -> ApprovalDecision | None:
 
 
 def detect_interactive_choices(text: str) -> tuple[str, list[str], int] | None:
-    """Compatibility shim: raw output is no longer parsed into Telegram choices."""
+    """Detect narrow Codex terminal menus that require key navigation."""
+    lines = [line.rstrip() for line in sanitize_terminal_text(text).splitlines()]
+    for selected_line_index in range(len(lines) - 1, -1, -1):
+        if not _terminal_choice_line_has_marker(lines[selected_line_index]):
+            continue
+        selected_label = _terminal_choice_label(lines[selected_line_index])
+        if not selected_label:
+            continue
+        prompt_index = _find_terminal_choice_prompt(lines, selected_line_index)
+        if prompt_index is None:
+            continue
+        labels: list[str] = []
+        selected_index = 0
+        for line in lines[prompt_index + 1 : prompt_index + 30]:
+            label = _terminal_choice_label(line)
+            if label:
+                if _terminal_choice_line_has_marker(line):
+                    selected_index = len(labels)
+                labels.append(label)
+                continue
+            if labels and not line.strip():
+                break
+        if len(labels) >= 2:
+            return lines[prompt_index].strip(), labels, selected_index
     return None
+
+
+PROMPT_PLACEHOLDERS = {"{{prompt}}", "{prompt}", "<prompt>", "[prompt]"}
+TERMINAL_CHOICE_PROMPTS = {
+    "select model",
+    "select model and effort",
+}
+TERMINAL_MODEL_LABEL_RE = re.compile(r"\b(?:gpt-[\w.-]+|codex)\b", re.IGNORECASE)
+
+
+def _choice_prompt_text(event: AgentEvent) -> str | None:
+    saw_placeholder = False
+    for value in (
+        event.text,
+        event.data.get("prompt"),
+        event.data.get("title"),
+    ):
+        text = _clean_choice_text(value)
+        if text:
+            return text
+        saw_placeholder = saw_placeholder or _looks_like_choice_placeholder(value)
+    if saw_placeholder:
+        return None
+    return "Select an option."
+
+
+def _clean_choice_text(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or _looks_like_choice_placeholder(value):
+        return ""
+    return text
+
+
+def _looks_like_choice_placeholder(value: object) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    if not text:
+        return False
+    first_line = text.splitlines()[0].strip().lstrip("›>").strip()
+    return first_line in PROMPT_PLACEHOLDERS
+
+
+def _find_terminal_choice_prompt(lines: list[str], selected_line_index: int) -> int | None:
+    for index in range(selected_line_index - 1, max(-1, selected_line_index - 12), -1):
+        if lines[index].strip().lower() in TERMINAL_CHOICE_PROMPTS:
+            return index
+    return None
+
+
+def _terminal_choice_line_has_marker(line: str) -> bool:
+    return line.lstrip().startswith(("›", ">"))
+
+
+def _terminal_choice_label(line: str) -> str:
+    stripped = line.strip()
+    if not stripped:
+        return ""
+    if stripped.startswith(("›", ">")):
+        label = stripped[1:].strip()
+    elif line.startswith(("  ", "\t")):
+        label = stripped
+    else:
+        return ""
+    if not _looks_like_terminal_model_choice_label(label):
+        return ""
+    return label
+
+
+def _looks_like_terminal_model_choice_label(label: str) -> bool:
+    if not TERMINAL_MODEL_LABEL_RE.search(label):
+        return False
+    if "·" in label or "~/" in label:
+        return False
+    return not label.lower().startswith(("tip:", "access legacy models", "pick a quick"))
 
 
 def normalize_echo_text(text: str) -> str:
@@ -1767,13 +1942,38 @@ def normalize_echo_text(text: str) -> str:
 def _echo_matches(line: str, echo: str) -> bool:
     if line == echo:
         return True
+    if echo and line.replace(echo, "").strip() == "":
+        return True
     if len(echo) >= 80 and (line in echo or echo in line):
         return True
     return False
 
 
-def _fit_progress_text(lines: list[str], *, limit: int = TELEGRAM_TEXT_LIMIT) -> str:
-    return render_progress(lines, limit=limit)
+def _strip_agent_input_echo_prefixes(line: str, echoes: list[str]) -> str:
+    cleaned = line
+    for echo in echoes:
+        cleaned = _strip_repeated_echo_prefix(cleaned, echo)
+    return cleaned
+
+
+def _strip_repeated_echo_prefix(line: str, echo: str) -> str:
+    if not echo:
+        return line
+    working = line.lstrip()
+    removed = 0
+    while True:
+        working = working.lstrip()
+        if working.startswith("›"):
+            working = working[1:].lstrip()
+        if not working.startswith(echo):
+            break
+        working = working[len(echo) :]
+        removed += 1
+    if removed == 0:
+        return line
+    if removed == 1 and working.strip():
+        return line
+    return working.lstrip()
 
 
 AUDIO_DOCUMENT_EXTENSIONS = {".oga", ".ogg", ".opus", ".mp3", ".m4a", ".wav", ".webm"}
@@ -1880,6 +2080,11 @@ def _write_temp_log(text: str) -> Path:
     with handle:
         handle.write(text)
     return Path(handle.name)
+
+
+def _is_telegram_message_not_modified(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return "message is not modified" in text or "message not modified" in text
 
 
 def build_transcriber(settings: Settings) -> Transcriber:

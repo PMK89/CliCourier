@@ -46,7 +46,7 @@ class AgentSession:
         self._visible_buffer = OutputRingBuffer(recent_output_max_chars)
         backend = resolve_agent_backend(adapter, terminal_backend)
         self.backend = backend
-        self.replaces_output_snapshots = False
+        self.replaces_output_snapshots = backend == "tmux"
         if backend == "tmux":
             env = build_agent_env(env_allowlist)
             self._process = TmuxAgentProcess(
@@ -147,9 +147,17 @@ class AgentSession:
     def _record_event(self, event: AgentEvent) -> None:
         self.last_event = event
         if event.text:
-            self._buffer.append(event.text)
-            if event.kind not in DEBUG_EVENT_KINDS and not event.is_debug:
-                self._visible_buffer.append(event.text)
+            if (
+                self.replaces_output_snapshots
+                and event.kind == AgentEventKind.ASSISTANT_DELTA
+                and not event.is_debug
+            ):
+                self._buffer.replace(event.text)
+                self._visible_buffer.replace(event.text)
+            else:
+                self._buffer.append(event.text)
+                if event.kind not in DEBUG_EVENT_KINDS and not event.is_debug:
+                    self._visible_buffer.append(event.text)
         if event.kind == AgentEventKind.SESSION_STARTED:
             self.state = "idle"
         elif event.kind == AgentEventKind.TURN_STARTED:

@@ -84,16 +84,19 @@ def detect_pending_approval(
     if not cleaned.strip():
         return None
 
-    tail = cleaned[-4000:]
+    source_tail = _after_last_auto_approval(cleaned[-8000:])
+    tail = _approval_scan_text(source_tail)[-4000:]
+    if not tail.strip():
+        return None
     for pattern in adapter.approval_patterns:
         match = pattern.search(tail)
         if match is None:
             continue
-        if AUTO_APPROVAL_RE.search(tail[match.start() :]):
+        if _is_auto_approval_context(tail, match):
             return None
         detected_at = now or datetime.now(UTC)
         return PendingApproval(
-            prompt_excerpt=safe_excerpt(tail[max(0, match.start() - 500) :], 900),
+            prompt_excerpt=safe_excerpt(_approval_prompt_excerpt(tail, match), 900),
             detected_at=detected_at,
             adapter_id=adapter.id,
             nonce=new_nonce(),
@@ -101,3 +104,77 @@ def detect_pending_approval(
             message_id=message_id,
         )
     return None
+
+
+def _after_last_auto_approval(text: str) -> str:
+    last_match: re.Match[str] | None = None
+    for match in AUTO_APPROVAL_RE.finditer(text):
+        last_match = match
+    if last_match is None:
+        return text
+    return text[last_match.end() :]
+
+
+def _approval_scan_text(text: str) -> str:
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if AUTO_APPROVAL_RE.search(stripped):
+            continue
+        if _looks_like_terminal_noise(stripped):
+            continue
+        lines.append(stripped)
+    return "\n".join(lines)
+
+
+def _looks_like_terminal_noise(line: str) -> bool:
+    if line.startswith("›"):
+        return True
+    if "esc to interrupt" in line.lower():
+        return True
+    if re.match(r"^(?:gpt-|claude|gemini)\S*\s+", line, re.IGNORECASE):
+        return True
+    if re.match(r"^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+", line):
+        return True
+    if re.match(r"^[MADRCU?!]{1,2}\s+", line):
+        return True
+    if re.match(
+        r"^[•◦]\s*(running|ran|read|opened|searched|updated|patched|executing)\b",
+        line,
+        re.IGNORECASE,
+    ):
+        return True
+    if line.startswith(("└", "╰")):
+        return True
+    return False
+
+
+def _is_auto_approval_context(text: str, match: re.Match[str]) -> bool:
+    context_start = max(0, match.start() - 160)
+    context_end = min(len(text), match.end() + 160)
+    return AUTO_APPROVAL_RE.search(text[context_start:context_end]) is not None
+
+
+def _approval_prompt_excerpt(text: str, match: re.Match[str]) -> str:
+    line_ranges: list[tuple[int, int, str]] = []
+    offset = 0
+    for line in text.splitlines():
+        start = offset
+        end = start + len(line)
+        line_ranges.append((start, end, line))
+        offset = end + 1
+
+    match_index = 0
+    for index, (start, end, _line) in enumerate(line_ranges):
+        if start <= match.start() <= end or start <= match.end() <= end:
+            match_index = index
+            break
+
+    context = [
+        line
+        for _start, _end, line in line_ranges[max(0, match_index - 2) : match_index + 2]
+        if line.strip()
+    ]
+    return "\n".join(context) or match.group(0)

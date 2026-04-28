@@ -207,6 +207,20 @@ def test_prompt_placeholder_is_not_detected_as_choice() -> None:
     )
 
 
+def test_detect_interactive_choices_detects_codex_model_menu() -> None:
+    assert detect_interactive_choices(
+        "Select Model\n"
+        "Pick a quick auto mode or browse all models.\n"
+        "› gpt-5.5 xhigh\n"
+        "  gpt-5.4 high\n"
+        "  gpt-5.3-codex medium\n"
+    ) == (
+        "Select Model",
+        ["gpt-5.5 xhigh", "gpt-5.4 high", "gpt-5.3-codex medium"],
+        0,
+    )
+
+
 def test_pending_action_creation_and_lookup(tmp_path: Path) -> None:
     state = RuntimeState.create(tmp_path)
     action = pending_action(
@@ -239,6 +253,59 @@ def test_dashboard_rendering_stays_under_telegram_limit() -> None:
     )
 
     assert len(rendered) <= 4096
+
+
+async def test_dashboard_update_skips_unchanged_text(tmp_path: Path) -> None:
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+
+    await bridge._maybe_update_dashboard(bot_api, 100, session, force=True)
+    await bridge._maybe_update_dashboard(bot_api, 100, session, force=True)
+
+    assert len(bot_api.send_calls) == 1
+    assert bot_api.edit_calls == []
+
+
+async def test_dashboard_update_ignores_telegram_not_modified_error(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bot_api = NotModifiedEditBot()
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+
+    await bridge._maybe_update_dashboard(bot_api, 100, session, force=True)
+    bridge._dashboard_last_text[100] = "previous dashboard text"
+    await bridge._maybe_update_dashboard(bot_api, 100, session, force=True)
+
+    assert len(bot_api.send_calls) == 1
+    assert len(bot_api.edit_calls) == 1
+    assert "telegram dashboard edit failed" not in capsys.readouterr().out
 
 
 def test_initial_agent_context_is_prepended_once(tmp_path: Path) -> None:
@@ -363,11 +430,27 @@ class FakeBot:
 
 
 def non_dashboard_messages(messages: list[str]) -> list[str]:
-    return [message for message in messages if not message.startswith("Agent:")]
+    return [progress_body(message) for message in messages if not message.startswith("Agent:")]
 
 
 def non_dashboard_send_calls(bot: FakeBot) -> list[tuple[int, int, str]]:
-    return [call for call in bot.send_calls if not call[2].startswith("Agent:")]
+    return [
+        (message_id, chat_id, progress_body(text))
+        for message_id, chat_id, text in bot.send_calls
+        if not text.startswith("Agent:")
+    ]
+
+
+def progress_body(text: str) -> str:
+    lines = text.splitlines()
+    if (
+        len(lines) >= 3
+        and lines[0] in {"Running.", "Finished."}
+        and lines[1] in {"Showing latest 60 lines", "Showing final 60 lines"}
+        and lines[2] == ""
+    ):
+        return "\n".join(lines[3:])
+    return text
 
 
 class EditFailBot(FakeBot):
@@ -375,6 +458,16 @@ class EditFailBot(FakeBot):
         self.edits.append((message_id, text))
         self.edit_calls.append((message_id, chat_id, text))
         raise RuntimeError("edit rejected")
+
+
+class NotModifiedEditBot(FakeBot):
+    async def edit_message_text(self, *, chat_id: int, message_id: int, text: str, **kwargs) -> None:
+        self.edits.append((message_id, text))
+        self.edit_calls.append((message_id, chat_id, text))
+        raise RuntimeError(
+            "Message is not modified: specified new message content and reply markup "
+            "are exactly the same as a current content and reply markup of the message"
+        )
 
 
 class FakeTelegramFile:
@@ -492,7 +585,7 @@ async def test_muted_telegram_request_still_delivers_final_output(tmp_path: Path
     await bridge._send_to_agent("open example.com", message, FakeContext())
     await bridge._send_agent_output(bot_api, 100, "Done.", complete_request=True)
 
-    assert bot_api.messages == ["Done."]
+    assert non_dashboard_messages(bot_api.messages) == ["Done."]
 
 
 async def test_muted_telegram_request_still_delivers_approval_prompt(tmp_path: Path) -> None:
@@ -533,7 +626,7 @@ async def test_terminal_progress_posts_after_sixty_lines_and_edits_after_next_si
     tmp_path: Path,
 ) -> None:
     bridge = TelegramBridgeBot(
-        settings=settings(tmp_path),
+        settings=settings(tmp_path, OUTPUT_FLUSH_INTERVAL_MS="1"),
         state=RuntimeState.create(tmp_path),
         sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
         screenshot_service=ScreenshotService(
@@ -550,20 +643,23 @@ async def test_terminal_progress_posts_after_sixty_lines_and_edits_after_next_si
 
     await bridge._update_terminal_progress(bot_api, 100, first_page)
 
-    assert bot_api.messages == [first_page.strip()]
+    assert [progress_body(message) for message in bot_api.messages] == [first_page.strip()]
     assert bot_api.edits == []
 
+    await asyncio.sleep(0.002)
     await bridge._update_terminal_progress(bot_api, 100, second_page)
 
-    assert bot_api.messages == [second_page.strip()]
-    assert bot_api.edits == [(1, second_page.strip())]
+    assert [progress_body(message) for message in bot_api.messages] == [second_page.strip()]
+    assert [(message_id, progress_body(text)) for message_id, text in bot_api.edits] == [
+        (1, second_page.strip())
+    ]
 
 
 async def test_terminal_progress_final_output_updates_same_message_with_last_lines(
     tmp_path: Path,
 ) -> None:
     bridge = TelegramBridgeBot(
-        settings=settings(tmp_path),
+        settings=settings(tmp_path, OUTPUT_FLUSH_INTERVAL_MS="1"),
         state=RuntimeState.create(tmp_path),
         sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
         screenshot_service=ScreenshotService(
@@ -582,8 +678,8 @@ async def test_terminal_progress_final_output_updates_same_message_with_last_lin
     await bridge._send_agent_output(bot_api, 100, final_text, complete_request=True)
 
     expected = "\n".join(f"line {index}" for index in range(16, 76))
-    assert bot_api.messages == [expected]
-    assert bot_api.edits[-1] == (1, expected)
+    assert [progress_body(message) for message in bot_api.messages] == [expected]
+    assert (bot_api.edits[-1][0], progress_body(bot_api.edits[-1][1])) == (1, expected)
 
 
 async def test_terminal_progress_final_tail_does_not_replace_accumulated_page(
@@ -608,8 +704,8 @@ async def test_terminal_progress_final_tail_does_not_replace_accumulated_page(
     await bridge._send_agent_output(bot_api, 100, "line 60", complete_request=True)
 
     expected = "\n".join(f"line {index}" for index in range(1, 61))
-    assert bot_api.messages == [expected]
-    assert bot_api.edits[-1] == (1, expected)
+    assert [progress_body(message) for message in bot_api.messages] == [expected]
+    assert (bot_api.edits[-1][0], progress_body(bot_api.edits[-1][1])) == (1, expected)
 
 
 async def test_send_to_agent_autostarts_agent_when_missing(tmp_path: Path, monkeypatch) -> None:
@@ -841,6 +937,10 @@ async def test_photo_caption_is_forwarded_with_saved_image_path(tmp_path: Path) 
     assert "Attached image files from the bridge (including WhatsApp media):" in sent
     assert "Inspect those local image files as part of this request." in sent
     assert "incoming-media" in sent
+    media_files = list((tmp_path / ".clicourier" / "incoming-media").iterdir())
+    assert len(media_files) == 1
+    assert media_files[0].read_bytes() == b"fake jpeg bytes"
+    assert str(media_files[0]) in sent
     assert context.bot.requested_file_id == "image-1"
 
 
@@ -879,6 +979,10 @@ async def test_image_only_message_uses_default_prompt_text(tmp_path: Path) -> No
     sent = state.active_agent.sent[0]
     assert "Please inspect the attached image." in sent
     assert "whatsapp" not in sent
+    media_files = list((tmp_path / ".clicourier" / "incoming-media").iterdir())
+    assert len(media_files) == 1
+    assert media_files[0].read_bytes() == b"png bytes"
+    assert str(media_files[0]) in sent
     assert context.bot.requested_file_id == "image-1"
 
 
@@ -903,6 +1007,31 @@ def test_agent_output_suppresses_sent_text_echo(tmp_path: Path) -> None:
         )
         == "Done: output/playwright/page.png"
     )
+
+
+def test_agent_output_strips_repeated_sent_text_echo_prefix(tmp_path: Path) -> None:
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    prompt = "Improve documentation in @filename"
+    bridge._remember_agent_input_echo(100, prompt)
+
+    assert (
+        bridge._suppress_agent_input_echoes(
+            100,
+            f"{prompt}{prompt}{prompt}platform linux -- Python 3.11.13",
+        )
+        == "platform linux -- Python 3.11.13"
+    )
+    assert bridge._suppress_agent_input_echoes(100, f"{prompt}{prompt}") == ""
 
 
 async def test_unknown_slash_command_is_forwarded_raw_to_agent(tmp_path: Path) -> None:
@@ -1024,7 +1153,7 @@ async def test_choice_reply_is_not_inferred_without_pending_action(tmp_path: Pat
     assert message.replies == []
 
 
-async def test_choice_request_renders_all_options_and_accepts_numeric_reply(tmp_path: Path) -> None:
+async def test_choice_request_renders_all_options_and_sends_choice_value(tmp_path: Path) -> None:
     app_settings = settings(tmp_path)
     state = RuntimeState.create(tmp_path)
     state.active_agent = FakeAgent()
@@ -1069,6 +1198,124 @@ async def test_choice_request_renders_all_options_and_accepts_numeric_reply(tmp_
     assert state.active_agent.sent == ["gpt-5"]
     assert state.active_pending_action("choice_request") is None
     assert message.replies == ["Sent option 2: gpt-5"]
+
+
+async def test_terminal_model_choice_reply_sends_navigation_keys(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path)
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    state.add_pending_action(
+        pending_action(
+            kind="choice_request",
+            session_id="codex",
+            chat_id=100,
+            choices=(
+                PendingActionChoice(id="1", label="gpt-5.5 xhigh", value="1"),
+                PendingActionChoice(id="2", label="gpt-5.4 high", value="2"),
+                PendingActionChoice(id="3", label="gpt-5.3-codex medium", value="3"),
+            ),
+            data={
+                "input_mode": "terminal_navigation",
+                "selected_index": 0,
+            },
+        )
+    )
+    bot = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    message = FakeMessage()
+
+    handled = await bot._maybe_handle_choice_reply("3", message, FakeContext())
+
+    assert handled is True
+    assert state.active_agent.sent == []
+    assert state.active_agent.keys == ["Down", "Down", "Enter"]
+    assert state.active_pending_action("choice_request") is None
+    assert message.replies == ["Sent option 3: gpt-5.3-codex medium"]
+
+
+async def test_terminal_model_menu_emits_pending_number_choices(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path)
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    bot = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot_api = FakeBot()
+    session = FakeFlushSession()
+
+    await bot._maybe_emit_terminal_choice_request(
+        bot_api,
+        100,
+        session,
+        "Select Model\n"
+        "› gpt-5.5 xhigh\n"
+        "  gpt-5.4 high\n"
+        "  gpt-5.3-codex medium\n",
+    )
+
+    assert non_dashboard_messages(bot_api.messages) == [
+        "Select Model\n"
+        "\n"
+        "1. gpt-5.5 xhigh\n"
+        "2. gpt-5.4 high\n"
+        "3. gpt-5.3-codex medium\n"
+        "\n"
+        "Reply with a number."
+    ]
+    pending = state.active_pending_action("choice_request", chat_id=100)
+    assert pending is not None
+    assert pending.data["input_mode"] == "terminal_navigation"
+    assert pending.data["selected_index"] == 0
+
+
+async def test_choice_request_ignores_placeholder_only_prompt(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path)
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    bot = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot_api = FakeBot()
+
+    await bot._handle_agent_event(
+        bot_api,
+        100,
+        state.active_agent,
+        AgentEvent(
+            kind=AgentEventKind.CHOICE_REQUEST,
+            text="› {{prompt}}\n  Write the answer here",
+            session_id="generic",
+            data={"choices": [{"id": "1", "label": "Write the answer here", "value": "1"}]},
+        ),
+    )
+
+    assert non_dashboard_messages(bot_api.messages) == []
+    assert state.active_pending_action("choice_request") is None
 
 
 async def test_final_flush_retains_output_while_approval_pending(tmp_path: Path) -> None:
@@ -1204,7 +1451,7 @@ async def test_final_mode_idle_does_not_emit_repeated_final_messages(tmp_path: P
     task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
     try:
         await asyncio.sleep(0.05)
-        assert non_dashboard_messages(bot_api.messages) == []
+        assert non_dashboard_messages(bot_api.messages) == ["line 1\nline 2"]
     finally:
         session.is_running = False
         await asyncio.wait_for(task, timeout=1)
@@ -1242,7 +1489,7 @@ async def test_idle_output_is_cached_until_sixty_line_page_is_ready(tmp_path: Pa
     try:
         await session.output_queue.put(first_half)
         await asyncio.sleep(0.05)
-        assert non_dashboard_messages(bot_api.messages) == []
+        assert non_dashboard_messages(bot_api.messages) == [first_half.strip()]
 
         await session.output_queue.put(second_half)
         for _ in range(50):
@@ -1261,7 +1508,7 @@ async def test_idle_output_is_cached_until_sixty_line_page_is_ready(tmp_path: Pa
 
     expected = "\n".join(f"line {index}" for index in range(61, 121))
     assert non_dashboard_messages(bot_api.messages) == [expected]
-    assert bot_api.edits[-1][1] == expected
+    assert progress_body(bot_api.edits[-1][1]) == expected
 
 
 async def test_line_by_line_deltas_publish_and_edit_sixty_line_pages(tmp_path: Path) -> None:
@@ -1298,20 +1545,22 @@ async def test_line_by_line_deltas_publish_and_edit_sixty_line_pages(tmp_path: P
 
         for index in range(61, 121):
             await session.output_queue.put(f"line {index}\n")
+        second_expected = "\n".join(f"line {index}" for index in range(61, 121))
         for _ in range(50):
-            if bot_api.edits:
+            if non_dashboard_messages(bot_api.messages) == [second_expected]:
                 break
             await asyncio.sleep(0.005)
     finally:
         session.is_running = False
         await asyncio.wait_for(task, timeout=1)
 
-    first_expected = "\n".join(f"line {index}" for index in range(1, 61))
-    second_expected = "\n".join(f"line {index}" for index in range(61, 121))
     agent_sends = non_dashboard_send_calls(bot_api)
     assert len(agent_sends) == 1
-    assert agent_sends[0][2] == first_expected
-    assert bot_api.edits[-1] == (agent_sends[0][0], second_expected)
+    assert agent_sends[0][2] == "line 1"
+    assert (bot_api.edits[-1][0], progress_body(bot_api.edits[-1][1])) == (
+        agent_sends[0][0],
+        second_expected,
+    )
     assert non_dashboard_messages(bot_api.messages) == [second_expected]
 
 
@@ -1369,7 +1618,7 @@ async def test_progress_edits_single_agent_message_with_dashboard_present(tmp_pa
     state.active_agent = session
     bot_api = FakeBot()
     bridge = TelegramBridgeBot(
-        settings=settings(tmp_path),
+        settings=settings(tmp_path, OUTPUT_FLUSH_INTERVAL_MS="1"),
         state=state,
         sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
         screenshot_service=ScreenshotService(
@@ -1385,16 +1634,19 @@ async def test_progress_edits_single_agent_message_with_dashboard_present(tmp_pa
 
     await bridge._maybe_update_dashboard(bot_api, 100, session, force=True)
     await bridge._update_terminal_progress(bot_api, 100, first_page)
+    await asyncio.sleep(0.002)
     await bridge._update_terminal_progress(bot_api, 100, second_page)
 
     agent_sends = non_dashboard_send_calls(bot_api)
     assert len(agent_sends) == 1
     progress_message_id = agent_sends[0][0]
     assert progress_message_id == 2
-    assert bot_api.edits == [(progress_message_id, second_expected)]
+    assert [(message_id, progress_body(text)) for message_id, text in bot_api.edits] == [
+        (progress_message_id, second_expected)
+    ]
     assert len(bot_api.messages) == 2
     assert bot_api.messages[0].startswith("Agent:")
-    assert bot_api.messages[1] == second_expected
+    assert progress_body(bot_api.messages[1]) == second_expected
 
 
 async def test_complete_output_edits_existing_progress_message_not_new_message(tmp_path: Path) -> None:
@@ -1403,7 +1655,7 @@ async def test_complete_output_edits_existing_progress_message_not_new_message(t
     state.active_agent = session
     bot_api = FakeBot()
     bridge = TelegramBridgeBot(
-        settings=settings(tmp_path),
+        settings=settings(tmp_path, OUTPUT_FLUSH_INTERVAL_MS="1"),
         state=state,
         sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
         screenshot_service=ScreenshotService(
@@ -1425,14 +1677,17 @@ async def test_complete_output_edits_existing_progress_message_not_new_message(t
     assert len(agent_sends) == 1
     progress_message_id = agent_sends[0][0]
     assert progress_message_id == 2
-    assert bot_api.edits[-1] == (progress_message_id, final_expected)
+    assert (bot_api.edits[-1][0], progress_body(bot_api.edits[-1][1])) == (
+        progress_message_id,
+        final_expected,
+    )
     assert len(bot_api.messages) == 2
     assert non_dashboard_messages(bot_api.messages) == [final_expected]
 
 
 async def test_progress_logging_records_send_and_edit(tmp_path: Path, capsys) -> None:
     bridge = TelegramBridgeBot(
-        settings=settings(tmp_path),
+        settings=settings(tmp_path, OUTPUT_FLUSH_INTERVAL_MS="1"),
         state=RuntimeState.create(tmp_path),
         sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
         screenshot_service=ScreenshotService(
@@ -1447,6 +1702,7 @@ async def test_progress_logging_records_send_and_edit(tmp_path: Path, capsys) ->
     second_page = "".join(f"line {index}\n" for index in range(61, 121))
 
     await bridge._update_terminal_progress(bot_api, 100, first_page)
+    await asyncio.sleep(0.002)
     await bridge._update_terminal_progress(bot_api, 100, second_page)
 
     log_output = capsys.readouterr().out
@@ -1459,7 +1715,7 @@ async def test_progress_edit_failure_is_logged_without_sending_extra_message(
     capsys,
 ) -> None:
     bridge = TelegramBridgeBot(
-        settings=settings(tmp_path),
+        settings=settings(tmp_path, OUTPUT_FLUSH_INTERVAL_MS="1"),
         state=RuntimeState.create(tmp_path),
         sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
         screenshot_service=ScreenshotService(
@@ -1474,6 +1730,7 @@ async def test_progress_edit_failure_is_logged_without_sending_extra_message(
     second_page = "".join(f"line {index}\n" for index in range(61, 121))
 
     await bridge._update_terminal_progress(bot_api, 100, first_page)
+    await asyncio.sleep(0.002)
     await bridge._update_terminal_progress(bot_api, 100, second_page)
 
     log_output = capsys.readouterr().out
@@ -1513,7 +1770,7 @@ async def test_structured_mode_waits_for_turn_completion_before_short_final_outp
     try:
         await session.output_queue.put("line 1\n")
         await asyncio.sleep(0.05)
-        assert non_dashboard_messages(bot_api.messages) == []
+        assert non_dashboard_messages(bot_api.messages) == ["line 1"]
 
         await session.output_queue.put(
             AgentEvent(
@@ -1783,7 +2040,7 @@ async def test_flush_prefers_full_buffered_multiline_output_over_short_final_tai
 async def test_terminal_progress_edits_current_sixty_line_page(tmp_path: Path) -> None:
     bot_api = FakeBot()
     bridge = TelegramBridgeBot(
-        settings=settings(tmp_path),
+        settings=settings(tmp_path, OUTPUT_FLUSH_INTERVAL_MS="1"),
         state=RuntimeState.create(tmp_path),
         sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
         screenshot_service=ScreenshotService(
@@ -1795,10 +2052,72 @@ async def test_terminal_progress_edits_current_sixty_line_page(tmp_path: Path) -
     )
 
     await bridge._update_terminal_progress(bot_api, 100, "line 1\n")
+    await asyncio.sleep(0.002)
     await bridge._update_terminal_progress(bot_api, 100, "line 2\n")
 
-    assert bot_api.messages == []
-    assert bot_api.edits == []
+    assert [progress_body(message) for message in bot_api.messages] == ["line 1\nline 2"]
+    assert [(message_id, progress_body(text)) for message_id, text in bot_api.edits] == [
+        (1, "line 1\nline 2")
+    ]
+
+
+async def test_terminal_progress_replaces_tmux_snapshots(tmp_path: Path) -> None:
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path, OUTPUT_FLUSH_INTERVAL_MS="1"),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+
+    await bridge._replace_terminal_progress(bot_api, 100, "old prompt\nold output\n")
+    await asyncio.sleep(0.002)
+    await bridge._replace_terminal_progress(bot_api, 100, "new output\n")
+
+    assert [progress_body(message) for message in bot_api.messages] == ["new output"]
+    assert [(message_id, progress_body(text)) for message_id, text in bot_api.edits] == [
+        (1, "new output")
+    ]
+
+
+async def test_flush_agent_output_replaces_tmux_snapshot_progress(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path, OUTPUT_FLUSH_INTERVAL_MS="1")
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    session.replaces_output_snapshots = True
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        await session.output_queue.put("old prompt\nold output\n")
+        await asyncio.sleep(0.01)
+        await session.output_queue.put("new output\n")
+        for _ in range(50):
+            if non_dashboard_messages(bot_api.messages) == ["new output"]:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    assert non_dashboard_messages(bot_api.messages) == ["new output"]
 
 
 async def test_terminal_progress_keeps_one_message_after_sixty_lines(tmp_path: Path) -> None:
@@ -1819,13 +2138,45 @@ async def test_terminal_progress_keeps_one_message_after_sixty_lines(tmp_path: P
     await bridge._update_terminal_progress(bot_api, 100, text)
 
     assert len(bot_api.messages) == 1
-    assert bot_api.messages[0].splitlines() == [f"line {number}" for number in range(1, 61)]
+    assert progress_body(bot_api.messages[0]).splitlines() == [
+        f"line {number}" for number in range(1, 61)
+    ]
+
+
+async def test_large_initial_chunk_sends_first_page_then_final_latest_page(tmp_path: Path) -> None:
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    text = "".join(f"LINE {number:03d}\n" for number in range(1, 151))
+
+    await bridge._update_terminal_progress(bot_api, 100, text)
+
+    assert len(bot_api.messages) == 1
+    assert progress_body(bot_api.messages[0]).splitlines() == [
+        f"LINE {number:03d}" for number in range(1, 61)
+    ]
+
+    await bridge._send_agent_output(bot_api, 100, text, complete_request=True)
+
+    final_lines = progress_body(bot_api.messages[0]).splitlines()
+    assert final_lines == [f"LINE {number:03d}" for number in range(91, 151)]
+    assert "LINE 001" not in progress_body(bot_api.messages[0])
+    assert {message_id for message_id, _text in bot_api.edits} == {1}
 
 
 async def test_nonfinal_agent_output_uses_single_progress_message(tmp_path: Path) -> None:
     bot_api = FakeBot()
     bridge = TelegramBridgeBot(
-        settings=settings(tmp_path),
+        settings=settings(tmp_path, OUTPUT_FLUSH_INTERVAL_MS="1"),
         state=RuntimeState.create(tmp_path),
         sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
         screenshot_service=ScreenshotService(
@@ -1840,10 +2191,13 @@ async def test_nonfinal_agent_output_uses_single_progress_message(tmp_path: Path
     second_page = "".join(f"line {index}\n" for index in range(61, 121))
 
     await bridge._send_agent_output(bot_api, 100, first_page)
+    await asyncio.sleep(0.002)
     await bridge._send_agent_output(bot_api, 100, second_page)
 
-    assert bot_api.messages == [second_page.strip()]
-    assert bot_api.edits == [(1, second_page.strip())]
+    assert [progress_body(message) for message in bot_api.messages] == [second_page.strip()]
+    assert [(message_id, progress_body(text)) for message_id, text in bot_api.edits] == [
+        (1, second_page.strip())
+    ]
 
 
 async def test_agent_output_sends_referenced_screenshot_as_document_fallback(tmp_path: Path) -> None:

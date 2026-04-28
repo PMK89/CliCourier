@@ -47,7 +47,7 @@ def codex_payload_to_event(
     payload: dict[str, Any],
     *,
     session_id: str | None = None,
-) -> AgentEvent:
+) -> AgentEvent | None:
     event_type = _event_type(payload)
     normalized_type = _normalize_type(event_type)
     native_session_id = _first_str(payload, "session_id", "sessionId", "conversation_id", "id")
@@ -271,17 +271,24 @@ def _choice_event(
     *,
     session_id: str | None,
     turn_id: str | None,
-) -> AgentEvent:
-    prompt = _first_str(payload, "prompt", "title")
+) -> AgentEvent | None:
+    prompt = _first_non_placeholder_str(payload, "prompt", "title")
     text = _text(payload)
+    placeholder_only = _looks_like_prompt_placeholder(text) or any(
+        isinstance(payload.get(key), str) and _looks_like_prompt_placeholder(payload[key])
+        for key in ("prompt", "title")
+    )
     if _looks_like_prompt_placeholder(text):
         text = ""
+    choices = _normalize_choices(payload.get("choices"))
+    if not choices or (placeholder_only and not (prompt or text)):
+        return None
     return AgentEvent(
         kind=AgentEventKind.CHOICE_REQUEST,
         text=prompt or text or "Select an option.",
         session_id=session_id,
         turn_id=turn_id,
-        data={**payload, "choices": _normalize_choices(payload.get("choices"))},
+        data={**payload, "choices": choices},
     )
 
 
@@ -310,6 +317,17 @@ def _first_str(payload: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
         value = payload.get(key)
         if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _first_non_placeholder_str(payload: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if not isinstance(value, str):
+            continue
+        value = value.strip()
+        if value and not _looks_like_prompt_placeholder(value):
             return value
     return None
 
@@ -363,7 +381,7 @@ def _normalize_choices(value: Any) -> list[dict[str, str]]:
     for index, item in enumerate(value, start=1):
         if isinstance(item, str):
             label = item.strip()
-            if not label:
+            if not label or _looks_like_prompt_placeholder(label):
                 continue
             normalized.append({"id": str(index), "label": label, "value": str(index)})
             continue
@@ -372,6 +390,12 @@ def _normalize_choices(value: Any) -> list[dict[str, str]]:
         label = _stringify_text_value(item.get("label")) or _stringify_text_value(item.get("text"))
         value_text = _stringify_text_value(item.get("value"))
         choice_id = _stringify_text_value(item.get("id")) or str(index)
+        if _looks_like_prompt_placeholder(label):
+            label = ""
+        if _looks_like_prompt_placeholder(value_text):
+            value_text = ""
+        if _looks_like_prompt_placeholder(choice_id):
+            choice_id = str(index)
         if not label and value_text:
             label = value_text
         if not label:
@@ -390,4 +414,5 @@ def _looks_like_prompt_placeholder(value: str) -> bool:
     stripped = value.strip()
     if not stripped:
         return False
-    return stripped in {"{{prompt}}", "{prompt}", "<prompt>", "[prompt]"}
+    first_line = stripped.splitlines()[0].strip().lstrip("›>").strip()
+    return first_line in {"{{prompt}}", "{prompt}", "<prompt>", "[prompt]"}
