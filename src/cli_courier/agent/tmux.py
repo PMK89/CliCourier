@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import shlex
 import shutil
@@ -144,7 +143,7 @@ class TmuxAgentProcess:
         while self._has_session():
             snapshot = await asyncio.to_thread(self._capture_snapshot)
             if snapshot and snapshot != self._last_snapshot:
-                await self.output_queue.put(_snapshot_delta(self._last_snapshot, snapshot))
+                await self.output_queue.put(snapshot)
                 self._last_snapshot = snapshot
             await asyncio.sleep(self.poll_interval_seconds)
 
@@ -179,13 +178,3 @@ class TmuxAgentProcess:
 
 def _shell_assignment(key: str, value: str) -> str:
     return f"{key}={shlex.quote(value)}"
-
-
-def _snapshot_delta(previous: str, current: str) -> str:
-    if not previous:
-        return current
-    common = os.path.commonprefix([previous, current])
-    if len(common) > min(len(previous), len(current)) * 0.6:
-        delta = current[len(common) :].lstrip("\n")
-        return delta or current
-    return current

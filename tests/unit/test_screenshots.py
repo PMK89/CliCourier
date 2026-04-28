@@ -57,6 +57,17 @@ def test_artifact_for_reference_resolves_workspace_relative_path(tmp_path: Path)
     assert service.artifact_for_reference("output/playwright/page.png").path == screenshot.resolve()
 
 
+def test_artifact_for_reference_rejects_missing_file_as_screenshot_error(tmp_path: Path) -> None:
+    service = ScreenshotService(
+        workspace_root=tmp_path,
+        screenshot_dir=None,
+        max_bytes=1024,
+    )
+
+    with pytest.raises(ScreenshotError, match="does not exist"):
+        service.artifact_for_reference("missing.png")
+
+
 def test_artifacts_since_returns_valid_new_screenshots(tmp_path: Path) -> None:
     screenshot_dir = tmp_path / ".playwright-cli"
     screenshot_dir.mkdir()

@@ -190,12 +190,14 @@ When an approval action is pending, `yes`, `y`, `ok`, 👍, or a heart approve i
 approval-like text is not sent as an approval. Use `/agent yes` to send that text literally.
 
 Agent output is shown through one editable progress message per chat: CliCourier sends
-the first 60 completed lines, edits that same message for each next 60-line page, and
-edits it one last time to the final tail when the turn completes. Structured Codex final
-answers are sent from `final_message` events. Reasoning, tool deltas, and status events
-update progress/debug state but are not exposed in Telegram as raw reasoning unless
-`/trace_on` is enabled. Use `/tail`, `/log`, or `/sendlog` to retrieve recent raw agent
-events on demand.
+one message when output starts, edits that same message with the latest 60-line rolling
+window, and force-edits it one last time to the final 60-line tail when the turn
+completes. Structured Codex final answers are sent from `final_message` events.
+Reasoning, tool deltas, and status events update progress/debug state but are not exposed
+in Telegram as raw reasoning unless `/trace_on` is enabled. Use `/tail`, `/log`, or
+`/sendlog` to retrieve recent raw agent events on demand. See
+[docs/telegram-message-editing.md](docs/telegram-message-editing.md) for the deterministic
+test agent and Telegram Web verification workflow.
 
 The daemon log records progress-message operations without message content, for example
 `clicourier agent_output action=progress_send_ok ...`,

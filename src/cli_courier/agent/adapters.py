@@ -88,7 +88,7 @@ def _rx(pattern: str) -> re.Pattern[str]:
 
 
 GENERIC_APPROVAL_PATTERNS = (
-    _rx(r"(?:approve|allow|proceed|continue).{0,120}(?:\?|y/n|\[y/n\]|\[y/N\])"),
+    _rx(r"\b(?:approve|allow|proceed|continue)\b.{0,120}(?:\?|y/n|\[y/n\]|\[y/N\])"),
     _rx(r"(?:do you want|would you like).{0,160}(?:\?|y/n|\[y/n\]|\[y/N\])"),
     _rx(r"(?:\[y/N\]|\[y/n\]|\(y/N\)|\(y/n\))"),
 )

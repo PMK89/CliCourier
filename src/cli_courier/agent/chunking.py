@@ -13,6 +13,9 @@ class OutputRingBuffer:
             return
         self._text = (self._text + text)[-self.max_chars :]
 
+    def replace(self, text: str) -> None:
+        self._text = text[-self.max_chars :] if text else ""
+
     def recent(self, max_chars: int | None = None) -> str:
         if max_chars is None:
             return self._text
@@ -41,4 +44,3 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
     if remaining:
         chunks.append(remaining)
     return chunks
-

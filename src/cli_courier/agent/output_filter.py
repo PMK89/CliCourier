@@ -13,6 +13,8 @@ TRACE_LINE_PATTERNS = tuple(
         r"^\s*(tool call|tool_call|function call|calling tool|running tool)\b.*$",
         r"^\s*(executing|reading|searching|editing|applying patch|observing)\b.*$",
         r"^\s*(bash|shell|python|apply_patch|functions\.[a-z_]+|web\.[a-z_]+)\s*(\(|:|$).*$",
+        r"^\s*[•◦]\s*(running|ran|read|opened|searched|updated|patched|executing)\b.*$",
+        r"^\s*[└╰]\s+.*$",
         r"^\s*(tokens|context window|model:|cwd:|sandbox:)\b.*$",
         r"^\s*(directory|tip):.*$",
         r"^\s*│\s*(model:|directory:).*$",

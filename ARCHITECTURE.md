@@ -98,8 +98,8 @@ map native events directly. Terminal fallback maps raw output to `assistant_delt
 uses the same editable progress-message renderer as structured output.
 
 The bridge does not chunk agent output into a stream of chat messages. It sends one
-progress message after 60 completed lines, edits that same message after each additional
-60-line page, and force-edits it to the final tail when a structured `final_message`,
+progress message when output starts, edits that same message with the latest 60-line
+rolling window, and force-edits it to the final tail when a structured `final_message`,
 `turn_completed`, or session stop arrives. Structured Codex final answers are sent from
 `final_message` events, while reasoning/tool/status events are treated as progress/debug
 data and are not shown as raw Telegram messages unless `/trace_on` is enabled.

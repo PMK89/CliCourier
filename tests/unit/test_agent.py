@@ -6,7 +6,7 @@ from cli_courier.agent.adapters import CodexAdapter, GenericCliAdapter
 from cli_courier.agent.approval import detect_pending_approval, interpret_approval_text
 from cli_courier.agent.chunking import OutputRingBuffer, chunk_text
 from cli_courier.agent.codex_jsonl import parse_codex_jsonl_line, parse_codex_jsonl_lines
-from cli_courier.agent.events import AgentEventKind
+from cli_courier.agent.events import AgentEvent, AgentEventKind
 from cli_courier.agent.output_filter import agent_output_in_progress, prepare_agent_output
 from cli_courier.agent.session import AgentSession, resolve_agent_backend, resolve_terminal_backend
 from cli_courier.agent.structured import _select_final_message_text
@@ -61,7 +61,7 @@ def test_codex_defaults_to_structured_backend() -> None:
     assert resolve_agent_backend(CodexAdapter(), "auto") == "structured"
 
 
-def test_agent_session_accumulates_tmux_output_deltas(tmp_path) -> None:
+def test_agent_session_replaces_tmux_output_snapshots(tmp_path) -> None:
     session = AgentSession(
         adapter=GenericCliAdapter(),
         command=["sh"],
@@ -70,7 +70,12 @@ def test_agent_session_accumulates_tmux_output_deltas(tmp_path) -> None:
         terminal_backend="tmux",
     )
 
-    assert session.replaces_output_snapshots is False
+    assert session.replaces_output_snapshots is True
+
+    session._record_event(AgentEvent(kind=AgentEventKind.ASSISTANT_DELTA, text="old screen"))
+    session._record_event(AgentEvent(kind=AgentEventKind.ASSISTANT_DELTA, text="new screen"))
+
+    assert session.recent_output() == "new screen"
 
 
 def test_tmux_session_names_are_sanitized(tmp_path) -> None:
@@ -101,6 +106,33 @@ def test_detect_pending_approval_ignores_auto_approval_output() -> None:
     assert pending is None
 
 
+def test_detect_pending_approval_ignores_auto_approval_near_git_status_questions() -> None:
+    pending = detect_pending_approval(
+        "✔ Auto-reviewer approved codex to run git status --short this time\n"
+        " M src/cli_courier/telegram_bot/runtime.py\n"
+        "?? tests/unit/test_output_renderer.py\n",
+        GenericCliAdapter(),
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert pending is None
+
+
+def test_detect_pending_approval_omits_codex_status_from_prompt_excerpt() -> None:
+    pending = detect_pending_approval(
+        "› Write tests for @filename\n"
+        "gpt-5.5 xhigh · ~/CliCourier Working (1m 45s • esc to interrupt)\n"
+        "Do you want to proceed? [y/N]\n",
+        GenericCliAdapter(),
+        now=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert pending is not None
+    assert pending.prompt_excerpt == "Do you want to proceed? [y/N]"
+    assert "Working" not in pending.prompt_excerpt
+    assert "Write tests" not in pending.prompt_excerpt
+
+
 def test_interpret_approval_words() -> None:
     assert interpret_approval_text("okay") == "approve"
     assert interpret_approval_text("y") == "approve"
@@ -118,6 +150,14 @@ def test_ring_buffer_truncates_old_output() -> None:
     buffer.append("hello")
     buffer.append(" world")
     assert buffer.recent() == "world"
+
+
+def test_ring_buffer_replace_discards_old_output() -> None:
+    buffer = OutputRingBuffer(20)
+    buffer.append("old terminal snapshot")
+    buffer.replace("new snapshot")
+
+    assert buffer.recent() == "new snapshot"
 
 
 def test_chunk_text_prefers_newline_boundaries() -> None:
@@ -173,6 +213,17 @@ def test_prepare_agent_output_suppresses_working_status_lines() -> None:
     )
 
     assert output == "Final answer"
+
+
+def test_prepare_agent_output_suppresses_codex_tool_status_lines() -> None:
+    output = prepare_agent_output(
+        "◦ Running uv run pytest -q\n"
+        "└ /bin/bash -lc 'uv run pytest -q'\n"
+        "153 passed in 2.60s\n",
+        suppress_trace_lines=True,
+    )
+
+    assert output == "153 passed in 2.60s"
 
 
 def test_prepare_agent_output_suppresses_codex_startup_banner() -> None:
@@ -341,3 +392,23 @@ def test_codex_jsonl_prefers_prompt_over_placeholder_text_for_choice_request() -
     assert event is not None
     assert event.kind == AgentEventKind.CHOICE_REQUEST
     assert event.text == "Select model"
+
+
+def test_codex_jsonl_drops_placeholder_only_choice_request() -> None:
+    event = parse_codex_jsonl_line(
+        '{"type":"choice_request","text":"› {{prompt}}\\n  Write the answer here",'
+        '"choices":[{"id":"1","label":"Write the answer here","value":"1"}]}'
+    )
+
+    assert event is None
+
+
+def test_codex_jsonl_filters_prompt_placeholder_choice_labels() -> None:
+    event = parse_codex_jsonl_line(
+        '{"type":"choice_request","prompt":"Select model",'
+        '"choices":["{{prompt}}",{"id":"2","label":"gpt-5","value":"gpt-5"}]}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.CHOICE_REQUEST
+    assert event.data["choices"] == [{"id": "2", "label": "gpt-5", "value": "gpt-5"}]
