@@ -6,6 +6,8 @@ from typing import Any
 
 from cli_courier.agent.events import AgentEvent, AgentEventKind
 
+PROMPT_PLACEHOLDERS = {"{{prompt}}", "{prompt}", "<prompt>", "[prompt]", "explain this codebase"}
+
 
 def parse_codex_jsonl_line(line: str, *, session_id: str | None = None) -> AgentEvent | None:
     stripped = line.strip()
@@ -415,4 +417,4 @@ def _looks_like_prompt_placeholder(value: str) -> bool:
     if not stripped:
         return False
     first_line = stripped.splitlines()[0].strip().lstrip("›>").strip()
-    return first_line in {"{{prompt}}", "{prompt}", "<prompt>", "[prompt]"}
+    return first_line.lower() in PROMPT_PLACEHOLDERS

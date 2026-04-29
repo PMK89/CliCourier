@@ -6,9 +6,12 @@ from dataclasses import dataclass
 BOT_COMMAND_SPECS: tuple[tuple[str, str], ...] = (
     ("start", "show bridge command list"),
     ("botstatus", "show bridge and agent status"),
+    ("restart", "restart CliCourier and resume the last Codex session"),
     ("start_agent", "start the configured agent"),
     ("stop_agent", "stop the active agent"),
-    ("restart_agent", "restart the active agent"),
+    ("restart_agent", "restart the active agent and resume by default"),
+    ("resume", "resume the last Codex session"),
+    ("resume_agent", "resume the last Codex session"),
     ("agent", "send text to the active agent"),
     ("agents", "list configured adapter options"),
     ("pwd", "show workspace path used by file commands"),

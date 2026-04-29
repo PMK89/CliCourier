@@ -24,6 +24,8 @@ class AgentAdapter(Protocol):
 
     def cleanup_prompt(self, prompt: str) -> str: ...
 
+    def build_resume_command(self, command: list[str]) -> list[str]: ...
+
     def build_structured_turn_command(
         self,
         command: list[str],
@@ -70,6 +72,9 @@ class BaseAdapter:
 
     def cleanup_prompt(self, prompt: str) -> str:
         return sanitize_terminal_text(prompt).strip()
+
+    def build_resume_command(self, command: list[str]) -> list[str]:
+        return command
 
     def build_structured_turn_command(
         self,
@@ -144,6 +149,14 @@ class CodexAdapter(BaseAdapter):
             result.extend(["--output-last-message", output_last_message_path])
         result.append(prompt)
         return result
+
+    def build_resume_command(self, command: list[str]) -> list[str]:
+        if not command:
+            raise ValueError("agent command must not be empty")
+        base = _strip_existing_exec(command)
+        if len(base) >= 2 and base[1] == "resume":
+            return base if "--last" in base else [base[0], "resume", "--last", *base[2:]]
+        return [base[0], "resume", "--last", *base[1:]]
 
 
 class GenericCliAdapter(BaseAdapter):

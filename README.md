@@ -162,6 +162,9 @@ Background daemon:
 
 ```bash
 clicourier start -- codex
+clicourier start --resume -- codex
+clicourier restart -- codex
+clicourier restart --no-resume -- codex
 clicourier status
 clicourier stop
 ```
@@ -171,6 +174,13 @@ tools use `DEFAULT_AGENT_ADAPTER=generic`; setup infers this for common non-Code
 The Codex adapter starts structured turns with `codex exec --json <prompt>`. Follow-up
 turns use `codex exec resume --last --json <prompt>`, so final answers, tool events,
 approval requests, and status updates arrive as JSONL events instead of terminal text.
+`clicourier restart` and Telegram `/restart` resume the most recent Codex session by
+default; pass `--no-resume` for a fresh session. Local `clicourier restart` starts the
+agent in tmux and attaches when run from an interactive terminal; use `--detach` to
+restart without attaching. Telegram `/restart` uses detached restart, opens a local
+terminal attached to tmux when a desktop terminal is available, and replies with the
+manual `tmux attach` command as fallback. Telegram `/resume` restarts the configured
+agent directly in resume mode.
 When you force `AGENT_TERMINAL_BACKEND=tmux` or `pty`, CliCourier falls back to terminal
 capture for local/TUI workflows.
 

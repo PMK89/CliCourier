@@ -33,7 +33,13 @@ CODEX_PROMPT_ECHO_RE = re.compile(
     r"^\s*›(?:\S.*(?:\bgpt-[\w.-]+|\bclaude\b|\bgemini\b|·\s*~)|\S{20,}.*)$",
     re.IGNORECASE,
 )
+CODEX_INPUT_PLACEHOLDER_RE = re.compile(
+    r"^\s*(?:[›>]\s*)?(?:[\u2580-\u259f\u25a0-\u25ff]\s*)?.*@filename\s*$",
+    re.IGNORECASE,
+)
+CODEX_INPUT_PLACEHOLDER_TEXTS = {"explain this codebase"}
 CODEX_LEADING_MARKER_RE = re.compile(r"^\s*›\s+")
+SGR_SEQUENCE_RE = re.compile(r"\x1b\[([0-9;:]*)m")
 
 IN_PROGRESS_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
@@ -46,9 +52,10 @@ IN_PROGRESS_PATTERNS = tuple(
 
 
 def prepare_agent_output(text: str, *, suppress_trace_lines: bool = True) -> str:
-    cleaned = sanitize_terminal_text(text)
-    cleaned = _remove_terminal_rewrite_noise(cleaned)
+    cleaned = _remove_terminal_rewrite_noise(text)
+    cleaned = sanitize_terminal_text(cleaned)
     lines = [line.rstrip() for line in cleaned.splitlines()]
+    lines = [line for line in lines if not looks_like_codex_input_placeholder(line)]
     lines = [_normalize_codex_output_line(line) for line in lines]
     lines = _trim_blank_edges(lines)
     if not suppress_trace_lines:
@@ -64,6 +71,21 @@ def agent_output_in_progress(text: str) -> bool:
     lines = [line for line in cleaned.splitlines() if line.strip()]
     tail = lines[-1] if lines else cleaned
     return any(pattern.search(tail) for pattern in IN_PROGRESS_PATTERNS)
+
+
+def looks_like_codex_input_placeholder(line: str) -> bool:
+    stripped = line.strip()
+    if CODEX_INPUT_PLACEHOLDER_RE.match(stripped):
+        return True
+    normalized = _normalize_codex_input_placeholder_line(stripped).lower()
+    return normalized in CODEX_INPUT_PLACEHOLDER_TEXTS
+
+
+def _normalize_codex_input_placeholder_line(line: str) -> str:
+    cleaned = line.strip().strip("│|").strip()
+    cleaned = re.sub(r"^(?:[›>]\s*)?(?:[\u2580-\u259f\u25a0-\u25ff]\s*)?", "", cleaned).strip()
+    cleaned = cleaned.strip("│|").strip()
+    return re.sub(r"\s+", " ", cleaned)
 
 
 def _looks_like_trace_line(line: str) -> bool:
@@ -96,5 +118,33 @@ def _remove_terminal_rewrite_noise(text: str) -> str:
     for line in text.splitlines():
         if "\b" in line:
             continue
+        if _line_has_background_sgr(line):
+            continue
         lines.append(line)
     return "\n".join(lines)
+
+
+def _line_has_background_sgr(line: str) -> bool:
+    for match in SGR_SEQUENCE_RE.finditer(line):
+        params = match.group(1).replace(":", ";")
+        codes = [part for part in params.split(";") if part]
+        index = 0
+        while index < len(codes):
+            code = codes[index]
+            try:
+                value = int(code)
+            except ValueError:
+                index += 1
+                continue
+            if value == 7 or 40 <= value <= 49 or value == 48 or 100 <= value <= 107:
+                return True
+            if value == 38 and index + 1 < len(codes):
+                mode = codes[index + 1]
+                if mode == "5":
+                    index += 3
+                    continue
+                if mode == "2":
+                    index += 5
+                    continue
+            index += 1
+    return False

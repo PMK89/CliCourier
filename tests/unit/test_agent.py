@@ -52,6 +52,12 @@ def test_codex_adapter_builds_structured_resume_command() -> None:
     assert command == ["codex", "exec", "resume", "--last", "--json", "follow up"]
 
 
+def test_codex_adapter_builds_interactive_resume_command() -> None:
+    command = CodexAdapter().build_resume_command(["codex", "--model", "gpt-5.5"])
+
+    assert command == ["codex", "resume", "--last", "--model", "gpt-5.5"]
+
+
 def test_resolve_terminal_backend_accepts_explicit_modes() -> None:
     assert resolve_terminal_backend("pty") == "pty"
     assert resolve_terminal_backend("tmux") == "tmux"
@@ -76,6 +82,76 @@ def test_agent_session_replaces_tmux_output_snapshots(tmp_path) -> None:
     session._record_event(AgentEvent(kind=AgentEventKind.ASSISTANT_DELTA, text="new screen"))
 
     assert session.recent_output() == "new screen"
+
+
+def test_agent_session_uses_resume_command_for_codex_terminal_backend(tmp_path) -> None:
+    session = AgentSession(
+        adapter=CodexAdapter(),
+        command=["codex", "--model", "gpt-5.5"],
+        cwd=tmp_path,
+        recent_output_max_chars=1000,
+        terminal_backend="tmux",
+        resume_last=True,
+    )
+
+    assert session.command == ["codex", "resume", "--last", "--model", "gpt-5.5"]
+
+
+def test_agent_session_uses_resume_last_for_codex_structured_backend(tmp_path) -> None:
+    session = AgentSession(
+        adapter=CodexAdapter(),
+        command=["codex"],
+        cwd=tmp_path,
+        recent_output_max_chars=1000,
+        terminal_backend="auto",
+        resume_last=True,
+    )
+
+    assert session.resume_last is True
+    assert getattr(session._process, "_has_started_turn") is True
+
+
+def test_agent_session_resets_tmux_snapshot_output_for_next_turn(tmp_path) -> None:
+    session = AgentSession(
+        adapter=GenericCliAdapter(),
+        command=["sh"],
+        cwd=tmp_path,
+        recent_output_max_chars=1000,
+        terminal_backend="tmux",
+    )
+    session._record_event(AgentEvent(kind=AgentEventKind.ASSISTANT_DELTA, text="old line 1\nold line 2"))
+
+    session.reset_output_for_next_turn()
+    session._record_event(AgentEvent(kind=AgentEventKind.ASSISTANT_DELTA, text="old line 1\nold line 2"))
+
+    assert session.recent_output() == ""
+
+    session._record_event(
+        AgentEvent(
+            kind=AgentEventKind.ASSISTANT_DELTA,
+            text="old line 1\nold line 2\nnew line",
+        )
+    )
+
+    assert session.recent_output() == "new line"
+
+
+def test_agent_session_resets_tmux_snapshot_output_when_capture_scrolls(tmp_path) -> None:
+    session = AgentSession(
+        adapter=GenericCliAdapter(),
+        command=["sh"],
+        cwd=tmp_path,
+        recent_output_max_chars=1000,
+        terminal_backend="tmux",
+    )
+    session._record_event(
+        AgentEvent(kind=AgentEventKind.ASSISTANT_DELTA, text="old line 1\nold line 2\nold line 3")
+    )
+
+    session.reset_output_for_next_turn()
+    session._record_event(AgentEvent(kind=AgentEventKind.ASSISTANT_DELTA, text="old line 2\nold line 3\nnew line"))
+
+    assert session.recent_output() == "new line"
 
 
 def test_tmux_session_names_are_sanitized(tmp_path) -> None:
@@ -121,6 +197,7 @@ def test_detect_pending_approval_ignores_auto_approval_near_git_status_questions
 def test_detect_pending_approval_omits_codex_status_from_prompt_excerpt() -> None:
     pending = detect_pending_approval(
         "› Write tests for @filename\n"
+        "Find and fix a bug in @filename\n"
         "gpt-5.5 xhigh · ~/CliCourier Working (1m 45s • esc to interrupt)\n"
         "Do you want to proceed? [y/N]\n",
         GenericCliAdapter(),
@@ -131,6 +208,7 @@ def test_detect_pending_approval_omits_codex_status_from_prompt_excerpt() -> Non
     assert pending.prompt_excerpt == "Do you want to proceed? [y/N]"
     assert "Working" not in pending.prompt_excerpt
     assert "Write tests" not in pending.prompt_excerpt
+    assert "Find and fix" not in pending.prompt_excerpt
 
 
 def test_interpret_approval_words() -> None:
@@ -204,6 +282,57 @@ def test_prepare_agent_output_returns_empty_for_prompt_echo_only() -> None:
     )
 
     assert output == ""
+
+
+def test_prepare_agent_output_suppresses_codex_input_placeholder() -> None:
+    output = prepare_agent_output(
+        "› Write tests for @filename\n"
+        "  gpt-5.5 xhigh · ~/CliCourier\n"
+        "Actual output\n",
+        suppress_trace_lines=True,
+    )
+
+    assert output == "Actual output"
+
+
+def test_prepare_agent_output_suppresses_codex_find_bug_placeholder() -> None:
+    output = prepare_agent_output(
+        "Find and fix a bug in @filename\n"
+        "Actual output\n",
+        suppress_trace_lines=True,
+    )
+
+    assert output == "Actual output"
+
+
+def test_prepare_agent_output_suppresses_codex_explain_codebase_placeholder() -> None:
+    output = prepare_agent_output(
+        "› Explain this codebase\n"
+        "│ Explain this codebase │\n"
+        "Actual output\n",
+        suppress_trace_lines=True,
+    )
+
+    assert output == "Actual output"
+
+
+def test_prepare_agent_output_suppresses_background_input_line() -> None:
+    output = prepare_agent_output(
+        "\x1b[48;5;236mFind and fix a bug in @filename\x1b[0m\n"
+        "Actual output\n",
+        suppress_trace_lines=True,
+    )
+
+    assert output == "Actual output"
+
+
+def test_prepare_agent_output_keeps_foreground_colored_output() -> None:
+    output = prepare_agent_output(
+        "\x1b[38;5;48mActual output\x1b[0m\n",
+        suppress_trace_lines=True,
+    )
+
+    assert output == "Actual output"
 
 
 def test_prepare_agent_output_suppresses_working_status_lines() -> None:
@@ -397,6 +526,15 @@ def test_codex_jsonl_prefers_prompt_over_placeholder_text_for_choice_request() -
 def test_codex_jsonl_drops_placeholder_only_choice_request() -> None:
     event = parse_codex_jsonl_line(
         '{"type":"choice_request","text":"› {{prompt}}\\n  Write the answer here",'
+        '"choices":[{"id":"1","label":"Write the answer here","value":"1"}]}'
+    )
+
+    assert event is None
+
+
+def test_codex_jsonl_drops_explain_codebase_placeholder_only_choice_request() -> None:
+    event = parse_codex_jsonl_line(
+        '{"type":"choice_request","text":"Explain this codebase",'
         '"choices":[{"id":"1","label":"Write the answer here","value":"1"}]}'
     )
 

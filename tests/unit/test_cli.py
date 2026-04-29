@@ -5,9 +5,11 @@ from pathlib import Path
 import pytest
 
 from cli_courier.daemon import DaemonStatus
+import cli_courier.cli as cli_courier_cli
 import clicourier.cli
 from cli_courier.cli import normalize_remainder
 from cli_courier.cli import normalize_run_mode, run_with_mode_prompt, set_mute_file
+from cli_courier.cli import terminal_attach_command
 from cli_courier.doctor import collect_checks
 from cli_courier.local_config import default_state_dir
 from cli_courier.setup import (
@@ -81,7 +83,7 @@ def test_telegram_run_mode_without_agent_starts_bridge_only(tmp_path: Path, monk
     class FakeSettings:
         notification_block_file = tmp_path / "muted"
         agent_tmux_session = "clicourier-test"
-        default_agent_command = "codex"
+        default_agent_command = ""
 
     monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
     monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: False)
@@ -100,8 +102,272 @@ def test_telegram_run_mode_without_agent_starts_bridge_only(tmp_path: Path, monk
     )
 
     assert result == 0
-    assert calls["start"]["auto_start_agent"] is True
+    assert calls["start"]["auto_start_agent"] is False
     assert not FakeSettings.notification_block_file.exists()
+
+
+def test_telegram_run_mode_with_default_agent_attaches_visible_tmux_agent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = {}
+
+    class FakeSettings:
+        notification_block_file = tmp_path / "muted"
+        agent_tmux_session = "clicourier-test"
+        default_agent_command = "codex"
+
+    monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
+    monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
+
+    def fake_start_daemon(**kwargs):
+        calls["start"] = kwargs
+        return DaemonStatus(True, 123, tmp_path / "pid", tmp_path / "log")
+
+    def fake_run(command, *, check=False):
+        calls["run"] = command
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr("cli_courier.cli.start_daemon", fake_start_daemon)
+    monkeypatch.setattr("cli_courier.cli.subprocess.run", fake_run)
+
+    result = run_with_mode_prompt(
+        config_path=None,
+        agent_command=[],
+        mode="telegram",
+    )
+
+    assert result == 0
+    assert calls["start"]["auto_start_agent"] is True
+    assert calls["run"] == ["tmux", "attach", "-t", "clicourier-test"]
+
+
+def test_start_can_resume_last_codex_session(tmp_path: Path, monkeypatch) -> None:
+    calls = {}
+
+    def fake_start_daemon(**kwargs):
+        calls["start"] = kwargs
+        return DaemonStatus(True, 123, tmp_path / "pid", tmp_path / "log")
+
+    monkeypatch.setattr("cli_courier.cli.start_daemon", fake_start_daemon)
+
+    result = cli_courier_cli.main(["start", "--resume"])
+
+    assert result == 0
+    assert calls["start"]["resume_agent"] is True
+
+
+def test_restart_resumes_last_codex_session_by_default(tmp_path: Path, monkeypatch) -> None:
+    calls = {}
+
+    class FakeSettings:
+        agent_tmux_session = "clicourier-test"
+        default_agent_command = "codex"
+
+    def fake_stop_daemon():
+        calls["stop"] = True
+        return DaemonStatus(False, None, tmp_path / "pid", tmp_path / "log")
+
+    def fake_start_daemon(**kwargs):
+        calls["start"] = kwargs
+        return DaemonStatus(True, 123, tmp_path / "pid", tmp_path / "log")
+
+    monkeypatch.setattr("cli_courier.cli.stop_daemon", fake_stop_daemon)
+    monkeypatch.setattr("cli_courier.cli.start_daemon", fake_start_daemon)
+    monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
+
+    result = cli_courier_cli.main(["restart"])
+
+    assert result == 0
+    assert calls["stop"] is True
+    assert calls["start"]["resume_agent"] is True
+    assert calls["start"]["auto_start_agent"] is True
+    assert calls["start"]["extra_env"]["AGENT_TERMINAL_BACKEND"] == "tmux"
+    assert calls["start"]["extra_env"]["AGENT_TMUX_SESSION"] == "clicourier-test"
+
+
+def test_restart_can_disable_resume(tmp_path: Path, monkeypatch) -> None:
+    calls = {}
+
+    class FakeSettings:
+        agent_tmux_session = "clicourier-test"
+        default_agent_command = "codex"
+
+    monkeypatch.setattr(
+        "cli_courier.cli.stop_daemon",
+        lambda: DaemonStatus(False, None, tmp_path / "pid", tmp_path / "log"),
+    )
+
+    def fake_start_daemon(**kwargs):
+        calls["start"] = kwargs
+        return DaemonStatus(True, 123, tmp_path / "pid", tmp_path / "log")
+
+    monkeypatch.setattr("cli_courier.cli.start_daemon", fake_start_daemon)
+    monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
+
+    result = cli_courier_cli.main(["restart", "--no-resume"])
+
+    assert result == 0
+    assert calls["start"]["resume_agent"] is False
+    assert calls["start"]["extra_env"]["AGENT_TERMINAL_BACKEND"] == "tmux"
+
+
+def test_restart_attaches_visible_tmux_agent_when_interactive(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls = {}
+
+    class FakeSettings:
+        agent_tmux_session = "clicourier-test"
+        default_agent_command = "codex"
+
+    monkeypatch.setattr(
+        "cli_courier.cli.stop_daemon",
+        lambda: DaemonStatus(False, None, tmp_path / "pid", tmp_path / "log"),
+    )
+    monkeypatch.setattr(
+        "cli_courier.cli.start_daemon",
+        lambda **kwargs: DaemonStatus(True, 123, tmp_path / "pid", tmp_path / "log"),
+    )
+    monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
+    monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    def fake_run(command, *, check=False):
+        calls["run"] = command
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr("cli_courier.cli.subprocess.run", fake_run)
+
+    result = cli_courier_cli.main(["restart"])
+
+    assert result == 0
+    assert calls["run"] == ["tmux", "attach", "-t", "clicourier-test"]
+
+
+def test_restart_detach_skips_attach_but_starts_tmux(tmp_path: Path, monkeypatch) -> None:
+    calls = {}
+
+    class FakeSettings:
+        agent_tmux_session = "clicourier-test"
+        default_agent_command = "codex"
+
+    monkeypatch.setattr(
+        "cli_courier.cli.stop_daemon",
+        lambda: DaemonStatus(False, None, tmp_path / "pid", tmp_path / "log"),
+    )
+
+    def fake_start_daemon(**kwargs):
+        calls["start"] = kwargs
+        return DaemonStatus(True, 123, tmp_path / "pid", tmp_path / "log")
+
+    monkeypatch.setattr("cli_courier.cli.start_daemon", fake_start_daemon)
+    monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
+    monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+    result = cli_courier_cli.main(["restart", "--detach"])
+
+    assert result == 0
+    assert calls["start"]["extra_env"]["AGENT_TERMINAL_BACKEND"] == "tmux"
+
+
+def test_restart_open_terminal_launches_desktop_terminal(tmp_path: Path, monkeypatch) -> None:
+    calls = {}
+
+    class FakeSettings:
+        agent_tmux_session = "clicourier-test"
+        default_agent_command = "codex"
+
+    monkeypatch.setattr(
+        "cli_courier.cli.stop_daemon",
+        lambda: DaemonStatus(False, None, tmp_path / "pid", tmp_path / "log"),
+    )
+    monkeypatch.setattr(
+        "cli_courier.cli.start_daemon",
+        lambda **kwargs: DaemonStatus(True, 123, tmp_path / "pid", tmp_path / "log"),
+    )
+    monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
+    monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
+    monkeypatch.setattr("cli_courier.cli.terminal_attach_command", lambda _session: ["terminal"])
+    monkeypatch.setenv("DISPLAY", ":0")
+
+    class FakePopen:
+        def __init__(self, command, **kwargs) -> None:
+            calls["command"] = command
+            calls["kwargs"] = kwargs
+
+    monkeypatch.setattr("cli_courier.cli.subprocess.Popen", FakePopen)
+
+    result = cli_courier_cli.main(["restart", "--detach", "--open-terminal"])
+
+    assert result == 0
+    assert calls["command"] == ["terminal"]
+    assert calls["kwargs"]["start_new_session"] is True
+    assert calls["kwargs"]["env"]["DISPLAY"] == ":0"
+
+
+def test_restart_open_terminal_infers_desktop_env(tmp_path: Path, monkeypatch) -> None:
+    calls = {}
+
+    class FakeSettings:
+        agent_tmux_session = "clicourier-test"
+        default_agent_command = "codex"
+
+    monkeypatch.setattr(
+        "cli_courier.cli.stop_daemon",
+        lambda: DaemonStatus(False, None, tmp_path / "pid", tmp_path / "log"),
+    )
+    monkeypatch.setattr(
+        "cli_courier.cli.start_daemon",
+        lambda **kwargs: DaemonStatus(True, 123, tmp_path / "pid", tmp_path / "log"),
+    )
+    monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
+    monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
+    monkeypatch.setattr("cli_courier.cli.terminal_attach_command", lambda _session: ["terminal"])
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr("cli_courier.cli.desktop_terminal_env", lambda: {"DISPLAY": ":0"})
+
+    class FakePopen:
+        def __init__(self, command, **kwargs) -> None:
+            calls["command"] = command
+            calls["kwargs"] = kwargs
+
+    monkeypatch.setattr("cli_courier.cli.subprocess.Popen", FakePopen)
+
+    result = cli_courier_cli.main(["restart", "--detach", "--open-terminal"])
+
+    assert result == 0
+    assert calls["command"] == ["terminal"]
+    assert calls["kwargs"]["env"]["DISPLAY"] == ":0"
+
+
+def test_terminal_attach_command_uses_gnome_terminal(monkeypatch) -> None:
+    def fake_which(name: str) -> str | None:
+        return f"/usr/bin/{name}" if name == "gnome-terminal" else None
+
+    monkeypatch.setattr("cli_courier.cli.shutil.which", fake_which)
+
+    assert terminal_attach_command("clicourier") == [
+        "/usr/bin/gnome-terminal",
+        "--",
+        "tmux",
+        "attach",
+        "-t",
+        "clicourier",
+    ]
 
 
 def test_infer_adapter_uses_codex_only_for_codex_command() -> None:

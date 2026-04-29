@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from cli_courier.agent.adapters import AgentAdapter
+from cli_courier.agent.output_filter import looks_like_codex_input_placeholder
 from cli_courier.security.terminal import safe_excerpt, sanitize_terminal_text
 from cli_courier.state import PendingApproval, new_nonce
 
@@ -130,6 +131,8 @@ def _approval_scan_text(text: str) -> str:
 
 
 def _looks_like_terminal_noise(line: str) -> bool:
+    if looks_like_codex_input_placeholder(line):
+        return True
     if line.startswith("›"):
         return True
     if "esc to interrupt" in line.lower():

@@ -4,6 +4,7 @@ import argparse
 import os
 import subprocess
 import shlex
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -73,7 +74,11 @@ def main(argv: list[str] | None = None) -> int:
         run_app(config_path=config_path)
         return 0
     if command == "start":
-        status = start_daemon(config_path=config_path, agent_command=normalize_remainder(args.agent) or None)
+        status = start_daemon(
+            config_path=config_path,
+            agent_command=normalize_remainder(args.agent) or None,
+            resume_agent=args.resume,
+        )
         if status.running:
             print(f"clicourier running with pid {status.pid}")
             print(f"log: {status.log_path}")
@@ -85,13 +90,43 @@ def main(argv: list[str] | None = None) -> int:
         print("clicourier stopped" if not status.running else f"clicourier still running: {status.pid}")
         return 0 if not status.running else 1
     if command == "restart":
+        agent = normalize_remainder(args.agent)
+        restart_plan = restart_agent_terminal_plan(
+            config_path=config_path,
+            agent_command=agent,
+            detach=args.detach,
+        )
         stopped = stop_daemon()
         if stopped.running:
             print(f"failed to stop existing clicourier process: {stopped.pid}", file=sys.stderr)
             return 1
-        status = start_daemon(config_path=config_path, agent_command=normalize_remainder(args.agent) or None)
-        print(f"clicourier running with pid {status.pid}" if status.running else "failed to start")
-        return 0 if status.running else 1
+        status = start_daemon(
+            config_path=config_path,
+            agent_command=agent or None,
+            extra_env=restart_plan.extra_env,
+            auto_start_agent=restart_plan.should_start_agent,
+            resume_agent=not args.no_resume,
+        )
+        if not status.running:
+            print("failed to start")
+            return 1
+        print(f"clicourier running with pid {status.pid}")
+        print(f"log: {status.log_path}")
+        if restart_plan.should_attach and restart_plan.tmux_session:
+            return attach_tmux_session(restart_plan.tmux_session)
+        if args.open_terminal and restart_plan.tmux_session:
+            if launch_tmux_terminal(restart_plan.tmux_session):
+                print(f"opened agent terminal: tmux attach -t {restart_plan.tmux_session}")
+            else:
+                print(
+                    f"could not open a local terminal; attach manually with: "
+                    f"tmux attach -t {restart_plan.tmux_session}",
+                    file=sys.stderr,
+                )
+            return 0
+        if restart_plan.tmux_session:
+            print(f"agent terminal: tmux attach -t {restart_plan.tmux_session}")
+        return 0
     if command == "status":
         status = daemon_status()
         mute_file = configured_mute_file(config_path)
@@ -170,9 +205,25 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("agent", nargs=argparse.REMAINDER, help="Optional CLI command to auto-start")
 
     start_parser = subparsers.add_parser("start", help="Start the bridge in the background")
+    start_parser.add_argument("--resume", action="store_true", help="Resume the last Codex session")
     start_parser.add_argument("agent", nargs=argparse.REMAINDER, help="Optional CLI command to auto-start")
 
     restart_parser = subparsers.add_parser("restart", help="Restart the background bridge")
+    restart_parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Start a fresh agent session instead of resuming the last Codex session",
+    )
+    restart_parser.add_argument(
+        "--detach",
+        action="store_true",
+        help="Restart without attaching to the agent tmux terminal",
+    )
+    restart_parser.add_argument(
+        "--open-terminal",
+        action="store_true",
+        help="Open a new desktop terminal attached to the agent tmux session",
+    )
     restart_parser.add_argument("agent", nargs=argparse.REMAINDER, help="Optional CLI command to auto-start")
 
     subparsers.add_parser("stop", help="Stop the background bridge")
@@ -247,12 +298,13 @@ def run_with_mode_prompt(
     }
     default_agent_command = getattr(settings, "default_agent_command", "").strip()
     should_start_agent = bool(agent_command) or bool(default_agent_command)
-    should_attach_terminal = bool(agent_command)
+    should_attach_terminal = should_start_agent
     status = start_daemon(
         config_path=config_path,
         agent_command=agent_command or None,
         extra_env=extra_env,
         auto_start_agent=should_start_agent,
+        resume_agent=False,
     )
     if not status.running:
         print("failed to start clicourier", file=sys.stderr)
@@ -267,13 +319,119 @@ def run_with_mode_prompt(
 
     if should_attach_terminal and selected in {"desktop", "local", "telegram"}:
         session_name = extra_env["AGENT_TMUX_SESSION"]
-        if wait_for_tmux_session(session_name):
-            print(f"attaching to agent terminal: tmux attach -t {session_name}")
-            return subprocess.run(["tmux", "attach", "-t", session_name], check=False).returncode
-        print(f"bridge started, but tmux session is not ready yet: {session_name}", file=sys.stderr)
-        print(f"attach later with: tmux attach -t {session_name}")
-        return 1
+        return attach_tmux_session(session_name)
     return 0
+
+
+class RestartTerminalPlan:
+    def __init__(
+        self,
+        *,
+        should_start_agent: bool,
+        should_attach: bool,
+        tmux_session: str | None,
+        extra_env: dict[str, str] | None,
+    ) -> None:
+        self.should_start_agent = should_start_agent
+        self.should_attach = should_attach
+        self.tmux_session = tmux_session
+        self.extra_env = extra_env
+
+
+def restart_agent_terminal_plan(
+    *,
+    config_path: Path | None,
+    agent_command: list[str],
+    detach: bool,
+) -> RestartTerminalPlan:
+    settings = load_settings(config_path)
+    default_agent_command = getattr(settings, "default_agent_command", "").strip()
+    should_start_agent = bool(agent_command) or bool(default_agent_command)
+    if not should_start_agent:
+        return RestartTerminalPlan(
+            should_start_agent=False,
+            should_attach=False,
+            tmux_session=None,
+            extra_env=None,
+        )
+    session_name = settings.agent_tmux_session or "clicourier"
+    return RestartTerminalPlan(
+        should_start_agent=True,
+        should_attach=not detach and sys.stdin.isatty() and sys.stdout.isatty(),
+        tmux_session=session_name,
+        extra_env={
+            "AGENT_TERMINAL_BACKEND": "tmux",
+            "AGENT_TMUX_SESSION": session_name,
+        },
+    )
+
+
+def attach_tmux_session(session_name: str) -> int:
+    if wait_for_tmux_session(session_name):
+        print(f"attaching to agent terminal: tmux attach -t {session_name}")
+        return subprocess.run(["tmux", "attach", "-t", session_name], check=False).returncode
+    print(f"bridge started, but tmux session is not ready yet: {session_name}", file=sys.stderr)
+    print(f"attach later with: tmux attach -t {session_name}")
+    return 1
+
+
+def launch_tmux_terminal(session_name: str) -> bool:
+    env = desktop_terminal_env()
+    if not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
+        return False
+    if not wait_for_tmux_session(session_name):
+        return False
+    command = terminal_attach_command(session_name)
+    if command is None:
+        return False
+    subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+        start_new_session=True,
+    )
+    return True
+
+
+def desktop_terminal_env() -> dict[str, str]:
+    env = os.environ.copy()
+    uid = os.getuid()
+    runtime_dir = Path(f"/run/user/{uid}")
+    if "XDG_RUNTIME_DIR" not in env and runtime_dir.exists():
+        env["XDG_RUNTIME_DIR"] = str(runtime_dir)
+    bus_path = runtime_dir / "bus"
+    if "DBUS_SESSION_BUS_ADDRESS" not in env and bus_path.exists():
+        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_path}"
+    if "WAYLAND_DISPLAY" not in env:
+        wayland_path = runtime_dir / "wayland-0"
+        if wayland_path.exists():
+            env["WAYLAND_DISPLAY"] = "wayland-0"
+    if "DISPLAY" not in env and Path("/tmp/.X11-unix/X0").exists():
+        env["DISPLAY"] = ":0"
+    return env
+
+
+def terminal_attach_command(session_name: str) -> list[str] | None:
+    attach_args = ["tmux", "attach", "-t", session_name]
+    for name in (
+        "gnome-terminal",
+        "kgx",
+        "xfce4-terminal",
+        "mate-terminal",
+        "konsole",
+        "xterm",
+        "x-terminal-emulator",
+    ):
+        path = shutil.which(name)
+        if path is None:
+            continue
+        executable = Path(path).name
+        if executable in {"gnome-terminal", "kgx", "xfce4-terminal", "mate-terminal"}:
+            return [path, "--", *attach_args]
+        return [path, "-e", *attach_args]
+    return None
 
 
 def normalize_run_mode(mode: str) -> str:
@@ -328,6 +486,7 @@ def print_config(config_path: Path | None) -> int:
     print(f"workspace_root: {settings.workspace_root}")
     print(f"default_agent_command: {settings.default_agent_command}")
     print(f"agent_terminal_backend: {settings.agent_terminal_backend.value}")
+    print(f"agent_resume_last: {settings.agent_resume_last}")
     print(f"agent_tmux_session: {settings.agent_tmux_session or 'clicourier'}")
     print(f"whisper_backend: {settings.whisper_backend.value}")
     print(f"whisper_model: {settings.whisper_model}")

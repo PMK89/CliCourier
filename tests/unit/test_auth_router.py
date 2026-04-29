@@ -137,16 +137,17 @@ def test_normalize_echo_text_collapses_terminal_prompt_text() -> None:
     assert normalize_echo_text("  Please open\nopenai.com   ") == "Please open openai.com"
 
 
-def test_interactive_choices_are_not_detected_from_raw_output() -> None:
-    assert (
-        detect_interactive_choices(
-            "Select reasoning effort\n"
-            "› low\n"
-            "  medium\n"
-            "  high\n"
-            "  xhigh\n"
-        )
-        is None
+def test_detect_interactive_choices_detects_reasoning_menu() -> None:
+    assert detect_interactive_choices(
+        "Select reasoning effort\n"
+        "› low\n"
+        "  medium\n"
+        "  high\n"
+        "  xhigh\n"
+    ) == (
+        "Select reasoning effort",
+        ["low", "medium", "high", "xhigh"],
+        0,
     )
 
 
@@ -219,6 +220,57 @@ def test_detect_interactive_choices_detects_codex_model_menu() -> None:
         ["gpt-5.5 xhigh", "gpt-5.4 high", "gpt-5.3-codex medium"],
         0,
     )
+
+
+def test_detect_interactive_choices_detects_codex_numbered_model_menu() -> None:
+    assert detect_interactive_choices(
+        "Select Model and Effort\n"
+        "Access legacy models by running codex -m <model_name> or in your config.toml\n"
+        "› 1. gpt-5.5 (current)  Frontier model for complex coding, research, and real-world work.\n"
+        "  2. gpt-5.4  Strong model for everyday coding.\n"
+        "  3. gpt-5.4-mini  Small, fast, and cost-efficient model for simpler coding tasks.\n"
+        "  4. gpt-5.3-codex  Coding-optimized model.\n"
+        "  5. gpt-5.2  Optimized for professional work and long-running agents.\n"
+        "Press enter to select reasoning effort, or esc to dismiss.\n"
+    ) == (
+        "Select Model and Effort",
+        [
+            "gpt-5.5 (current)  Frontier model for complex coding, research, and real-world work.",
+            "gpt-5.4  Strong model for everyday coding.",
+            "gpt-5.4-mini  Small, fast, and cost-efficient model for simpler coding tasks.",
+            "gpt-5.3-codex  Coding-optimized model.",
+            "gpt-5.2  Optimized for professional work and long-running agents.",
+        ],
+        0,
+    )
+
+
+def test_detect_interactive_choices_detects_codex_numbered_reasoning_menu() -> None:
+    assert detect_interactive_choices(
+        "Select Reasoning Level for gpt-5.5\n"
+        "  1. Low  Fast responses with lighter reasoning\n"
+        "› 2. Medium (default) (current)  Balances speed and reasoning depth for everyday tasks\n"
+        "  3. High  Greater reasoning depth for complex problems\n"
+        "  4. Extrahigh  Extra high reasoning depth for complex problems\n"
+        "Press enter to confirm or esc to go back\n"
+    ) == (
+        "Select Reasoning Level for gpt-5.5",
+        [
+            "Low  Fast responses with lighter reasoning",
+            "Medium (default) (current)  Balances speed and reasoning depth for everyday tasks",
+            "High  Greater reasoning depth for complex problems",
+            "Extrahigh  Extra high reasoning depth for complex problems",
+        ],
+        1,
+    )
+
+
+def test_detect_interactive_choices_detects_generic_slash_menu() -> None:
+    assert detect_interactive_choices(
+        "Select Personality\n"
+        "› Warm\n"
+        "  Concise\n"
+    ) == ("Select Personality", ["Warm", "Concise"], 0)
 
 
 def test_pending_action_creation_and_lookup(tmp_path: Path) -> None:
@@ -396,6 +448,7 @@ class FakeBot:
         self.photos = 0
         self.documents: list[str | None] = []
         self.messages: list[str] = []
+        self.reply_markups: list[object] = []
         self.send_calls: list[tuple[int, int, str]] = []
         self.edits: list[tuple[int, str]] = []
         self.edit_calls: list[tuple[int, int, str]] = []
@@ -408,6 +461,7 @@ class FakeBot:
     async def send_message(self, *, chat_id: int, text: str, **kwargs):
         message_id = len(self.messages) + 1
         self.messages.append(text)
+        self.reply_markups.append(kwargs.get("reply_markup"))
         self.send_calls.append((message_id, chat_id, text))
         return SimpleNamespace(message_id=message_id)
 
@@ -514,6 +568,14 @@ class FakeImageAttachment:
     file_size = 10
     file_name = "photo.jpg"
     mime_type = "image/jpeg"
+
+
+class FakeDocumentAttachment:
+    file_id = "document-1"
+    file_unique_id = "document-unique-1"
+    file_size = 10
+    file_name = "example.py"
+    mime_type = "text/x-python"
 
 
 class FakeCallbackQuery:
@@ -902,6 +964,46 @@ async def test_non_audio_document_is_not_transcribed(tmp_path: Path) -> None:
     assert message.replies == []
 
 
+async def test_audio_document_is_forwarded_as_file_upload(tmp_path: Path) -> None:
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=EchoTranscriber(),
+    )
+    message = FakeMessage()
+    message.document = FakeAudioAttachment()
+    context = FakeFileContext(b"audio bytes")
+
+    await bridge.handle_update(
+        SimpleNamespace(
+            effective_message=message,
+            effective_user=SimpleNamespace(id=42),
+            effective_chat=SimpleNamespace(id=100, type="private"),
+            message_reaction=None,
+        ),
+        context,
+    )
+
+    assert state.active_pending_action("voice_transcript", chat_id=100) is None
+    assert len(state.active_agent.sent) == 1
+    sent = state.active_agent.sent[0]
+    assert "Please inspect the attached file." in sent
+    uploaded_files = list((tmp_path / ".clicourier" / "incoming-files").iterdir())
+    assert len(uploaded_files) == 1
+    assert uploaded_files[0].name.endswith("-voice-message.ogg")
+    assert uploaded_files[0].read_bytes() == b"audio bytes"
+    assert str(uploaded_files[0]) in sent
+    assert context.bot.requested_file_id == "file-1"
+
+
 async def test_photo_caption_is_forwarded_with_saved_image_path(tmp_path: Path) -> None:
     state = RuntimeState.create(tmp_path)
     state.active_agent = FakeAgent()
@@ -986,6 +1088,87 @@ async def test_image_only_message_uses_default_prompt_text(tmp_path: Path) -> No
     assert context.bot.requested_file_id == "image-1"
 
 
+async def test_document_caption_is_forwarded_with_saved_file_path(tmp_path: Path) -> None:
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    message = FakeMessage()
+    message.caption = "Please inspect this file"
+    message.document = FakeDocumentAttachment()
+    context = FakeFileContext(b"print('hello')\n")
+
+    await bridge.handle_update(
+        SimpleNamespace(
+            effective_message=message,
+            effective_user=SimpleNamespace(id=42),
+            effective_chat=SimpleNamespace(id=100, type="private"),
+            message_reaction=None,
+        ),
+        context,
+    )
+
+    assert len(state.active_agent.sent) == 1
+    sent = state.active_agent.sent[0]
+    assert "Please inspect this file" in sent
+    assert "Attached files from the bridge:" in sent
+    assert "Read those local files as part of this request." in sent
+    assert "incoming-files" in sent
+    uploaded_files = list((tmp_path / ".clicourier" / "incoming-files").iterdir())
+    assert len(uploaded_files) == 1
+    assert uploaded_files[0].name.endswith("-example.py")
+    assert uploaded_files[0].read_bytes() == b"print('hello')\n"
+    assert str(uploaded_files[0]) in sent
+    assert context.bot.requested_file_id == "document-1"
+
+
+async def test_file_only_message_uses_default_prompt_text(tmp_path: Path) -> None:
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    message = FakeMessage()
+    message.document = FakeDocumentAttachment()
+    context = FakeFileContext(b"print('hello')\n")
+
+    await bridge.handle_update(
+        SimpleNamespace(
+            effective_message=message,
+            effective_user=SimpleNamespace(id=42),
+            effective_chat=SimpleNamespace(id=100, type="private"),
+            message_reaction=None,
+        ),
+        context,
+    )
+
+    assert len(state.active_agent.sent) == 1
+    sent = state.active_agent.sent[0]
+    assert "Please inspect the attached file." in sent
+    uploaded_files = list((tmp_path / ".clicourier" / "incoming-files").iterdir())
+    assert len(uploaded_files) == 1
+    assert uploaded_files[0].read_bytes() == b"print('hello')\n"
+    assert str(uploaded_files[0]) in sent
+    assert context.bot.requested_file_id == "document-1"
+
+
 def test_agent_output_suppresses_sent_text_echo(tmp_path: Path) -> None:
     bridge = TelegramBridgeBot(
         settings=settings(tmp_path),
@@ -1053,6 +1236,121 @@ async def test_unknown_slash_command_is_forwarded_raw_to_agent(tmp_path: Path) -
     await bot._handle_command(parse_command("/model gpt-5.5"), FakeMessage(), FakeContext())
 
     assert state.active_agent.sent[-1] == "/model gpt-5.5"
+
+
+async def test_restart_bridge_command_launches_detached_cli_restart(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    app_settings = settings(tmp_path)
+    bot = TelegramBridgeBot(
+        settings=app_settings,
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    calls = {}
+
+    class FakePopen:
+        def __init__(self, command, **kwargs) -> None:
+            calls["command"] = command
+            calls["kwargs"] = kwargs
+
+    monkeypatch.setattr("cli_courier.telegram_bot.runtime.subprocess.Popen", FakePopen)
+    message = FakeMessage()
+
+    await bot._handle_command(parse_command("/restart"), message, FakeContext())
+
+    assert calls["command"][-3:] == ["restart", "--detach", "--open-terminal"]
+    assert calls["kwargs"]["cwd"] == str(tmp_path)
+    assert calls["kwargs"]["start_new_session"] is True
+    assert message.replies == [
+        "Restarting CliCourier with Codex resume. The bot will reconnect shortly.\n"
+        "Opening local terminal for: tmux attach -t clicourier"
+    ]
+
+
+async def test_restart_bridge_command_can_disable_resume(tmp_path: Path, monkeypatch) -> None:
+    bot = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    calls = {}
+
+    class FakePopen:
+        def __init__(self, command, **kwargs) -> None:
+            calls["command"] = command
+
+    monkeypatch.setattr("cli_courier.telegram_bot.runtime.subprocess.Popen", FakePopen)
+
+    await bot._handle_command(parse_command("/restart --no-resume"), FakeMessage(), FakeContext())
+
+    assert calls["command"][-4:] == ["restart", "--detach", "--open-terminal", "--no-resume"]
+
+
+async def test_resume_command_starts_agent_with_required_resume(tmp_path: Path, monkeypatch) -> None:
+    bot = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    captured = {}
+
+    async def fake_start_agent_session(**kwargs) -> str:
+        captured.update(kwargs)
+        return "Agent resumed: codex resume --last"
+
+    monkeypatch.setattr(bot, "_start_agent_session", fake_start_agent_session)
+    message = FakeMessage()
+
+    await bot._handle_command(parse_command("/resume"), message, FakeContext())
+
+    assert captured["resume"] is True
+    assert captured["resume_required"] is True
+    assert message.replies == ["Agent resumed: codex resume --last"]
+
+
+async def test_restart_agent_resumes_by_default(tmp_path: Path, monkeypatch) -> None:
+    bot = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    captured = {}
+
+    async def fake_start_agent_session(**kwargs) -> str:
+        captured.update(kwargs)
+        return "Agent resumed: codex resume --last"
+
+    monkeypatch.setattr(bot, "_start_agent_session", fake_start_agent_session)
+
+    await bot._handle_command(parse_command("/restart_agent"), FakeMessage(), FakeContext())
+
+    assert captured["resume"] is True
 
 
 async def test_status_slash_command_is_forwarded_to_agent(tmp_path: Path) -> None:
@@ -1129,6 +1427,43 @@ async def test_post_init_registers_telegram_command_menu(tmp_path: Path) -> None
     assert "help" not in command_names
 
 
+async def test_post_init_autostarts_agent_without_sending_startup_messages(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    app_settings = settings(
+        tmp_path,
+        AUTO_START_AGENT=True,
+        DEFAULT_TELEGRAM_CHAT_ID="100",
+    )
+    bot = TelegramBridgeBot(
+        settings=app_settings,
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    captured = {}
+
+    async def fake_start_agent_session(**kwargs) -> str:
+        captured.update(kwargs)
+        return "Agent started: codex"
+
+    monkeypatch.setattr(bot, "_start_agent_session", fake_start_agent_session)
+    fake_bot = FakeBot()
+    application = SimpleNamespace(bot=fake_bot)
+
+    await bot._post_init(application)
+
+    assert captured["chat_id"] == 100
+    assert captured["application"] is application
+    assert fake_bot.messages == []
+
+
 async def test_choice_reply_is_not_inferred_without_pending_action(tmp_path: Path) -> None:
     app_settings = settings(tmp_path)
     state = RuntimeState.create(tmp_path)
@@ -1190,6 +1525,11 @@ async def test_choice_request_renders_all_options_and_sends_choice_value(tmp_pat
     assert non_dashboard_messages(bot_api.messages) == [
         "Select model\n\n1. gpt-5.5\n2. gpt-5\n\nReply with a number."
     ]
+    assert [
+        button.text
+        for row in bot_api.reply_markups[-1].inline_keyboard
+        for button in row
+    ] == ["1. gpt-5.5", "2. gpt-5"]
 
     message = FakeMessage()
     handled = await bot._maybe_handle_choice_reply("2", message, FakeContext())
@@ -1198,6 +1538,47 @@ async def test_choice_request_renders_all_options_and_sends_choice_value(tmp_pat
     assert state.active_agent.sent == ["gpt-5"]
     assert state.active_pending_action("choice_request") is None
     assert message.replies == ["Sent option 2: gpt-5"]
+
+
+async def test_choice_reply_clears_cached_progress_before_sending_slash_value(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path)
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    state.add_pending_action(
+        pending_action(
+            kind="choice_request",
+            session_id="codex",
+            chat_id=100,
+            choices=(
+                PendingActionChoice(
+                    id="2",
+                    label="Review uncommitted changes",
+                    value="/review uncommitted changes",
+                ),
+            ),
+        )
+    )
+    bot = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot._terminal_progress(100).replace_lines(["OpenAI Codex startup banner"])
+    message = FakeMessage()
+
+    handled = await bot._maybe_handle_choice_reply("1", message, FakeContext())
+
+    assert handled is True
+    assert state.active_agent.sent == ["/review uncommitted changes"]
+    assert 100 not in bot._terminal_progress_by_chat
+    assert 100 in bot._interactive_output_chats
+    assert message.replies == ["Sent option 1: Review uncommitted changes"]
 
 
 async def test_terminal_model_choice_reply_sends_navigation_keys(tmp_path: Path) -> None:
@@ -1283,6 +1664,50 @@ async def test_terminal_model_menu_emits_pending_number_choices(tmp_path: Path) 
     assert pending is not None
     assert pending.data["input_mode"] == "terminal_navigation"
     assert pending.data["selected_index"] == 0
+    assert [
+        button.text
+        for row in bot_api.reply_markups[-1].inline_keyboard
+        for button in row
+    ] == ["1. gpt-5.5 xhigh", "2. gpt-5.4 high", "3. gpt-5.3-codex medium"]
+
+
+async def test_terminal_model_menu_button_sends_navigation_keys(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path)
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    bot = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot_api = FakeBot()
+    session = FakeFlushSession()
+
+    await bot._maybe_emit_terminal_choice_request(
+        bot_api,
+        100,
+        session,
+        "Select Model\n"
+        "› gpt-5.5 xhigh\n"
+        "  gpt-5.4 high\n"
+        "  gpt-5.3-codex medium\n",
+    )
+    pending = state.active_pending_action("choice_request", chat_id=100)
+    assert pending is not None
+    query = FakeCallbackQuery(f"cc:{pending.id}:3")
+
+    await bot.handle_callback(FakeCallbackUpdate(query), FakeContext())
+
+    assert state.active_agent.sent == []
+    assert state.active_agent.keys == ["Down", "Down", "Enter"]
+    assert state.active_pending_action("choice_request") is None
+    assert query.edits == ["Sent option: gpt-5.3-codex medium"]
 
 
 async def test_choice_request_ignores_placeholder_only_prompt(tmp_path: Path) -> None:
@@ -1309,6 +1734,39 @@ async def test_choice_request_ignores_placeholder_only_prompt(tmp_path: Path) ->
         AgentEvent(
             kind=AgentEventKind.CHOICE_REQUEST,
             text="› {{prompt}}\n  Write the answer here",
+            session_id="generic",
+            data={"choices": [{"id": "1", "label": "Write the answer here", "value": "1"}]},
+        ),
+    )
+
+    assert non_dashboard_messages(bot_api.messages) == []
+    assert state.active_pending_action("choice_request") is None
+
+
+async def test_choice_request_ignores_explain_codebase_placeholder_prompt(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path)
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    bot = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot_api = FakeBot()
+
+    await bot._handle_agent_event(
+        bot_api,
+        100,
+        state.active_agent,
+        AgentEvent(
+            kind=AgentEventKind.CHOICE_REQUEST,
+            text="Explain this codebase",
             session_id="generic",
             data={"choices": [{"id": "1", "label": "Write the answer here", "value": "1"}]},
         ),

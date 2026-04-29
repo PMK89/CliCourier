@@ -37,16 +37,21 @@ class AgentSession:
         terminal_backend: str = "auto",
         tmux_session_name: str | None = None,
         tmux_history_lines: int = 300,
+        resume_last: bool = False,
     ) -> None:
         self.adapter = adapter
-        self.command = command
         self.cwd = cwd
         self.output_queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
         self._buffer = OutputRingBuffer(recent_output_max_chars)
         self._visible_buffer = OutputRingBuffer(recent_output_max_chars)
+        self._last_raw_snapshot = ""
+        self._snapshot_baseline = ""
         backend = resolve_agent_backend(adapter, terminal_backend)
         self.backend = backend
         self.replaces_output_snapshots = backend == "tmux"
+        self.resume_last = resume_last and adapter.capabilities.supports_resume
+        command = adapter.build_resume_command(command) if self.resume_last and backend != "structured" else command
+        self.command = command
         if backend == "tmux":
             env = build_agent_env(env_allowlist)
             self._process = TmuxAgentProcess(
@@ -62,6 +67,7 @@ class AgentSession:
                 adapter=adapter,
                 cwd=cwd,
                 env_allowlist=env_allowlist,
+                resume_last=self.resume_last,
             )
         else:
             env = build_agent_env(env_allowlist)
@@ -98,6 +104,7 @@ class AgentSession:
         await self.start()
 
     async def send_text(self, text: str) -> None:
+        self.reset_output_for_next_turn()
         await self._process.send_line(text, submit_sequence=self.adapter.submit_sequence)
 
     async def send_approval(self, text: str) -> None:
@@ -115,6 +122,12 @@ class AgentSession:
 
     def recent_visible_output(self, max_chars: int | None = None) -> str:
         return self._visible_buffer.recent(max_chars)
+
+    def reset_output_for_next_turn(self) -> None:
+        self._drain_pending_output()
+        self._snapshot_baseline = self._last_raw_snapshot if self.replaces_output_snapshots else ""
+        self._buffer.clear()
+        self._visible_buffer.clear()
 
     def status(self) -> AgentRuntimeStatus:
         return AgentRuntimeStatus(
@@ -146,6 +159,13 @@ class AgentSession:
 
     def _record_event(self, event: AgentEvent) -> None:
         self.last_event = event
+        if (
+            self.replaces_output_snapshots
+            and event.kind == AgentEventKind.ASSISTANT_DELTA
+            and not event.is_debug
+        ):
+            self._last_raw_snapshot = event.text
+            event.text = _snapshot_after_baseline(event.text, self._snapshot_baseline)
         if event.text:
             if (
                 self.replaces_output_snapshots
@@ -175,6 +195,17 @@ class AgentSession:
         elif event.kind in {AgentEventKind.TOOL_COMPLETED, AgentEventKind.TOOL_FAILED}:
             self.current_tool = None
 
+    def _drain_pending_output(self) -> None:
+        _drain_queue(self.output_queue)
+        process_queue = getattr(self._process, "output_queue", None)
+        if not isinstance(process_queue, asyncio.Queue):
+            return
+        for item in _drain_queue(process_queue):
+            if isinstance(item, str):
+                self._last_raw_snapshot = item
+            elif isinstance(item, AgentEvent) and item.text:
+                self._last_raw_snapshot = item.text
+
 
 def resolve_terminal_backend(value: str) -> str:
     if value == "auto":
@@ -188,3 +219,45 @@ def resolve_agent_backend(adapter: AgentAdapter, terminal_backend: str) -> str:
     if terminal_backend == "auto" and adapter.capabilities.supports_structured_stream:
         return "structured"
     return resolve_terminal_backend(terminal_backend)
+
+
+def _drain_queue(queue: asyncio.Queue) -> list[object]:
+    drained: list[object] = []
+    while True:
+        try:
+            drained.append(queue.get_nowait())
+        except asyncio.QueueEmpty:
+            return drained
+
+
+def _snapshot_after_baseline(snapshot: str, baseline: str) -> str:
+    if not snapshot or not baseline:
+        return snapshot
+    if snapshot == baseline:
+        return ""
+    if snapshot.startswith(baseline):
+        return snapshot[len(baseline) :].lstrip("\n")
+
+    snapshot_lines = snapshot.splitlines()
+    baseline_lines = baseline.splitlines()
+    if not snapshot_lines or not baseline_lines:
+        return snapshot
+
+    occurrence_start = _last_line_sequence_index(snapshot_lines, baseline_lines)
+    if occurrence_start is not None:
+        return "\n".join(snapshot_lines[occurrence_start + len(baseline_lines) :]).strip("\n")
+
+    max_overlap = min(len(snapshot_lines), len(baseline_lines))
+    for count in range(max_overlap, 0, -1):
+        if baseline_lines[-count:] == snapshot_lines[:count]:
+            return "\n".join(snapshot_lines[count:]).strip("\n")
+    return snapshot
+
+
+def _last_line_sequence_index(lines: list[str], needle: list[str]) -> int | None:
+    if len(needle) > len(lines):
+        return None
+    for index in range(len(lines) - len(needle), -1, -1):
+        if lines[index : index + len(needle)] == needle:
+            return index
+    return None

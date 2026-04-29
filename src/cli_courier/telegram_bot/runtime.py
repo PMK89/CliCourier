@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -113,12 +116,12 @@ class TelegramBridgeBot:
         if self.settings.default_telegram_chat_id is None:
             return
         if not self._notifications_muted():
-            reachable = await self._safe_send_message(
+            reachable = await self._safe_send_chat_action(
                 application.bot,
                 chat_id=self.settings.default_telegram_chat_id,
-                text="CliCourier connected. Starting agent...",
+                action="typing",
             )
-            if reachable is None:
+            if not reachable:
                 print(
                     "auto-start skipped: DEFAULT_TELEGRAM_CHAT_ID is not reachable. "
                     "Open the bot in Telegram and send /start, or clear DEFAULT_TELEGRAM_CHAT_ID.",
@@ -126,19 +129,13 @@ class TelegramBridgeBot:
                 )
                 return
         try:
-            message = await self._start_agent_session(
+            await self._start_agent_session(
                 chat_id=self.settings.default_telegram_chat_id,
                 application=application,
             )
         except Exception as exc:  # noqa: BLE001 - daemon log should capture startup failures
             print(f"failed to auto-start agent: {exc}", flush=True)
             return
-        if not self._notifications_muted():
-            await self._safe_send_message(
-                application.bot,
-                chat_id=self.settings.default_telegram_chat_id,
-                text=message,
-            )
 
     async def _post_shutdown(self, application) -> None:
         for task in list(self._flush_tasks):
@@ -181,9 +178,14 @@ class TelegramBridgeBot:
         image_paths = await self._download_prompt_images(message, context)
         if image_paths is None:
             return
+        file_paths = await self._download_prompt_files(message, context)
+        if file_paths is None:
+            return
         text = self._message_text(message)
         if text is None and image_paths:
             text = "Please inspect the attached image."
+        if text is None and file_paths:
+            text = "Please inspect the attached file." if len(file_paths) == 1 else "Please inspect the attached files."
         if text is None:
             return
         if await self._maybe_handle_voice_correction(text, message):
@@ -198,13 +200,19 @@ class TelegramBridgeBot:
         if route.kind == RouteKind.EMPTY:
             return
         if route.kind == RouteKind.COMMAND and route.command is not None:
-            await self._handle_command(route.command, message, context, image_paths=image_paths)
+            await self._handle_command(
+                route.command,
+                message,
+                context,
+                image_paths=image_paths,
+                file_paths=file_paths,
+            )
         elif route.kind == RouteKind.APPROVAL and route.approval_decision is not None:
             await self._handle_approval(route.approval_decision, message, context)
         elif route.kind == RouteKind.BLOCKED_APPROVAL:
             await message.reply_text("No approval is pending. Use /agent yes to send that text anyway.")
         elif route.kind == RouteKind.AGENT_TEXT:
-            await self._send_to_agent(route.text, message, context, image_paths=image_paths)
+            await self._send_to_agent(route.text, message, context, image_paths=image_paths, file_paths=file_paths)
 
     async def handle_callback(self, update, context) -> None:
         query = update.callback_query
@@ -279,12 +287,16 @@ class TelegramBridgeBot:
         context,
         *,
         image_paths: tuple[Path, ...] = (),
+        file_paths: tuple[Path, ...] = (),
     ) -> None:
         handlers = {
             "botstatus": self._cmd_status,
+            "restart": self._cmd_restart_bridge,
             "start_agent": self._cmd_start_agent,
             "stop_agent": self._cmd_stop_agent,
             "restart_agent": self._cmd_restart_agent,
+            "resume": self._cmd_resume_agent,
+            "resume_agent": self._cmd_resume_agent,
             "agent": self._cmd_agent,
             "agents": self._cmd_agents,
             "pwd": self._cmd_pwd,
@@ -325,11 +337,12 @@ class TelegramBridgeBot:
                 message,
                 context,
                 image_paths=image_paths,
+                file_paths=file_paths,
                 preserve_leading_slash=True,
             )
             return
         if command.name == "agent":
-            await handler(command.args, message, context, image_paths=image_paths)
+            await handler(command.args, message, context, image_paths=image_paths, file_paths=file_paths)
             return
         await handler(command.args, message, context)
 
@@ -360,18 +373,31 @@ class TelegramBridgeBot:
         if self.state.active_agent is not None and self.state.active_agent.is_running:
             await message.reply_text("Agent is already running.")
             return
+        resume = _resume_requested(args)
         try:
             reply = await self._start_agent_session(
                 chat_id=message.chat_id,
                 application=context.application,
+                resume=resume,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced to trusted operator
             await message.reply_text(f"Failed to start agent: {exc}")
             return
         await message.reply_text(reply)
 
-    async def _start_agent_session(self, *, chat_id: int, application=None, bot=None) -> str:
+    async def _start_agent_session(
+        self,
+        *,
+        chat_id: int,
+        application=None,
+        bot=None,
+        resume: bool = False,
+        resume_required: bool = False,
+    ) -> str:
         adapter = get_adapter(self.settings.default_agent_adapter)
+        if resume_required and not adapter.capabilities.supports_resume:
+            raise RuntimeError(f"{adapter.display_name} does not support session resume.")
+        resume_last = (resume or self.settings.agent_resume_last) and adapter.capabilities.supports_resume
         command = adapter.build_command(self.settings.default_agent_command)
         session = AgentSession(
             adapter=adapter,
@@ -382,6 +408,7 @@ class TelegramBridgeBot:
             terminal_backend=self.settings.agent_terminal_backend.value,
             tmux_session_name=self.settings.agent_tmux_session,
             tmux_history_lines=self.settings.agent_tmux_history_lines,
+            resume_last=resume_last,
         )
         await session.start()
         self.state.active_agent = session
@@ -399,7 +426,8 @@ class TelegramBridgeBot:
         )
         self._flush_tasks.add(task)
         task.add_done_callback(self._flush_tasks.discard)
-        return f"Agent started: {' '.join(command)}"
+        action = "resumed" if resume_last else "started"
+        return f"Agent {action}: {' '.join(session.command)}"
 
     async def _cmd_stop_agent(self, args: str, message, context) -> None:
         agent = self.state.active_agent
@@ -417,13 +445,67 @@ class TelegramBridgeBot:
         if self.state.active_agent is not None:
             await self.state.active_agent.stop()
             self.state.active_agent = None
-        await self._cmd_start_agent(args, message, context)
+        resume = not _no_resume_requested(args)
+        try:
+            reply = await self._start_agent_session(
+                chat_id=message.chat_id,
+                application=context.application,
+                resume=resume,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced to trusted operator
+            await message.reply_text(f"Failed to restart agent: {exc}")
+            return
+        await message.reply_text(reply)
 
-    async def _cmd_agent(self, args: str, message, context, *, image_paths: tuple[Path, ...] = ()) -> None:
+    async def _cmd_resume_agent(self, args: str, message, context) -> None:
+        if self.state.active_agent is not None:
+            await self.state.active_agent.stop()
+            self.state.active_agent = None
+        try:
+            reply = await self._start_agent_session(
+                chat_id=message.chat_id,
+                application=context.application,
+                resume=True,
+                resume_required=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced to trusted operator
+            await message.reply_text(f"Failed to resume agent: {exc}")
+            return
+        await message.reply_text(reply)
+
+    async def _cmd_restart_bridge(self, args: str, message, context) -> None:
+        command = _bridge_restart_command(no_resume=_no_resume_requested(args))
+        try:
+            subprocess.Popen(
+                command,
+                cwd=str(self.settings.workspace_root),
+                env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced to trusted operator
+            await message.reply_text(f"Failed to schedule CliCourier restart: {exc}")
+            return
+        suffix = "without resume" if _no_resume_requested(args) else "with Codex resume"
+        session_name = self.settings.agent_tmux_session or "clicourier"
+        await message.reply_text(
+            f"Restarting CliCourier {suffix}. The bot will reconnect shortly.\n"
+            f"Opening local terminal for: tmux attach -t {session_name}"
+        )
+
+    async def _cmd_agent(
+        self,
+        args: str,
+        message,
+        context,
+        *,
+        image_paths: tuple[Path, ...] = (),
+        file_paths: tuple[Path, ...] = (),
+    ) -> None:
         if not args:
             await message.reply_text("Usage: /agent <text>")
             return
-        await self._send_to_agent(args, message, context, image_paths=image_paths)
+        await self._send_to_agent(args, message, context, image_paths=image_paths, file_paths=file_paths)
 
     async def _cmd_agents(self, args: str, message, context) -> None:
         lines = [
@@ -670,12 +752,6 @@ class TelegramBridgeBot:
                 getattr(audio, "file_name", None),
                 getattr(audio, "mime_type", None),
             )
-        document = getattr(message, "document", None)
-        if document is not None and _document_is_audio(document):
-            return document, _audio_suffix(
-                getattr(document, "file_name", None),
-                getattr(document, "mime_type", None),
-            )
         return None
 
     async def _send_voice_confirmation(self, message, transcript: str) -> None:
@@ -706,6 +782,7 @@ class TelegramBridgeBot:
         context,
         *,
         image_paths: tuple[Path, ...] = (),
+        file_paths: tuple[Path, ...] = (),
         preserve_leading_slash: bool = False,
     ) -> None:
         self._start_typing(context.bot, message.chat_id)
@@ -716,6 +793,7 @@ class TelegramBridgeBot:
                 application=getattr(context, "application", None),
                 bot=getattr(context, "bot", None),
                 image_paths=image_paths,
+                file_paths=file_paths,
                 preserve_leading_slash=preserve_leading_slash,
             )
         except RuntimeError as exc:
@@ -733,6 +811,7 @@ class TelegramBridgeBot:
         application=None,
         bot=None,
         image_paths: tuple[Path, ...] = (),
+        file_paths: tuple[Path, ...] = (),
         preserve_leading_slash: bool = False,
     ) -> None:
         agent = self.state.active_agent
@@ -746,7 +825,11 @@ class TelegramBridgeBot:
             agent = self.state.active_agent
             if agent is None or not agent.is_running:
                 raise RuntimeError("Agent is not running.")
-        prompt_text = self._prompt_text_with_images(text, image_paths=image_paths)
+        prompt_text = self._prompt_text_with_attachments(
+            text,
+            image_paths=image_paths,
+            file_paths=file_paths,
+        )
         user_text = prompt_text if preserve_leading_slash else self._agent_user_text(prompt_text)
         if chat_id is not None:
             self._clear_terminal_progress(chat_id)
@@ -1102,16 +1185,15 @@ class TelegramBridgeBot:
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         keyboard_rows = []
-        current_row = []
         for index, choice in enumerate(choices, start=1):
-            current_row.append(
-                InlineKeyboardButton(str(index), callback_data=f"cc:{action.id}:{choice.id}")
+            keyboard_rows.append(
+                [
+                    InlineKeyboardButton(
+                        _choice_button_label(index, choice.label),
+                        callback_data=f"cc:{action.id}:{choice.id}",
+                    )
+                ]
             )
-            if len(current_row) == 4:
-                keyboard_rows.append(current_row)
-                current_row = []
-        if current_row:
-            keyboard_rows.append(current_row)
         text = f"{prompt}\n\n" + "\n".join(option_lines) + "\n\nReply with a number."
         sent = await self._safe_send_message(
             bot,
@@ -1164,16 +1246,15 @@ class TelegramBridgeBot:
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         keyboard_rows = []
-        current_row = []
         for index, choice in enumerate(choices, start=1):
-            current_row.append(
-                InlineKeyboardButton(str(index), callback_data=f"cc:{action.id}:{choice.id}")
+            keyboard_rows.append(
+                [
+                    InlineKeyboardButton(
+                        _choice_button_label(index, choice.label),
+                        callback_data=f"cc:{action.id}:{choice.id}",
+                    )
+                ]
             )
-            if len(current_row) == 4:
-                keyboard_rows.append(current_row)
-                current_row = []
-        if current_row:
-            keyboard_rows.append(current_row)
         text = f"{prompt}\n\n" + "\n".join(option_lines) + "\n\nReply with a number."
         sent = await self._safe_send_message(
             bot,
@@ -1598,6 +1679,23 @@ class TelegramBridgeBot:
         lines.append("Inspect those local image files as part of this request.")
         return "\n".join(line for line in lines if line is not None).strip()
 
+    def _prompt_text_with_attachments(
+        self,
+        text: str,
+        *,
+        image_paths: tuple[Path, ...] = (),
+        file_paths: tuple[Path, ...] = (),
+    ) -> str:
+        prompt = self._prompt_text_with_images(text, image_paths=image_paths)
+        if not file_paths:
+            return prompt
+        lines = [prompt, "", "Attached files from the bridge:"]
+        for path in file_paths:
+            resolved = path.resolve()
+            lines.append(f"- {resolved} (workspace path: {self.sandbox.display_path(path)})")
+        lines.append("Read those local files as part of this request.")
+        return "\n".join(line for line in lines if line is not None).strip()
+
     def _message_text(self, message) -> str | None:
         text = getattr(message, "text", None)
         if text is not None:
@@ -1633,6 +1731,26 @@ class TelegramBridgeBot:
             paths.append(target)
         return tuple(paths)
 
+    async def _download_prompt_files(self, message, context) -> tuple[Path, ...] | None:
+        attachments = self._file_attachments(message)
+        if not attachments:
+            return ()
+        paths: list[Path] = []
+        for attachment in attachments:
+            file_size = getattr(attachment, "file_size", None)
+            if file_size and file_size > self.settings.sendfile_max_bytes:
+                await message.reply_text("File is too large.")
+                return None
+            telegram_file = await context.bot.get_file(attachment.file_id)
+            target = self._prompt_file_path(attachment)
+            await telegram_file.download_to_drive(custom_path=target)
+            if target.stat().st_size > self.settings.sendfile_max_bytes:
+                target.unlink(missing_ok=True)
+                await message.reply_text("File is too large.")
+                return None
+            paths.append(target)
+        return tuple(paths)
+
     def _image_attachments(self, message) -> list[tuple[object, str]]:
         attachments: list[tuple[object, str]] = []
         photos = getattr(message, "photo", None) or ()
@@ -1652,11 +1770,27 @@ class TelegramBridgeBot:
             )
         return attachments
 
+    def _file_attachments(self, message) -> list[object]:
+        document = getattr(message, "document", None)
+        if document is None:
+            return []
+        if _document_is_image(document):
+            return []
+        return [document]
+
     def _prompt_image_path(self, file_unique_id: str, suffix: str) -> Path:
         target_dir = self.settings.workspace_root / ".clicourier" / "incoming-media"
         target_dir.mkdir(parents=True, exist_ok=True)
         timestamp = int(time.time() * 1000)
         return target_dir / f"{timestamp}-{file_unique_id}{suffix}"
+
+    def _prompt_file_path(self, attachment) -> Path:
+        target_dir = self.settings.workspace_root / ".clicourier" / "incoming-files"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = int(time.time() * 1000)
+        file_unique_id = getattr(attachment, "file_unique_id", None) or getattr(attachment, "file_id", "file")
+        file_name = _safe_incoming_file_name(getattr(attachment, "file_name", None))
+        return target_dir / f"{timestamp}-{_safe_path_component(file_unique_id)}-{file_name}"
 
     def _remember_agent_input_echo(self, chat_id: int, text: str) -> None:
         normalized = normalize_echo_text(text)
@@ -1718,6 +1852,14 @@ class TelegramBridgeBot:
             print(f"telegram send failed: {exc}", flush=True)
             return None
 
+    async def _safe_send_chat_action(self, bot, **kwargs) -> bool:
+        try:
+            await bot.send_chat_action(**kwargs)
+        except Exception as exc:  # noqa: BLE001 - Telegram errors should not crash the bridge
+            print(f"telegram chat action failed: {exc}", flush=True)
+            return False
+        return True
+
     def _record_session_event(self, session: AgentSession, event: AgentEvent) -> None:
         record = getattr(session, "_record_event", None)
         if callable(record):
@@ -1727,6 +1869,7 @@ class TelegramBridgeBot:
         agent = self.state.active_agent
         if agent is None:
             raise RuntimeError("Agent is not running.")
+        self._prepare_choice_output(action)
         if action.data.get("input_mode") == "terminal_navigation":
             await self._apply_terminal_choice_action(action, choice)
             return
@@ -1765,6 +1908,12 @@ class TelegramBridgeBot:
             await send_key(direction)
         await send_key("Enter")
         self.state.clear_pending_action(action.id)
+
+    def _prepare_choice_output(self, action: PendingAction) -> None:
+        if action.chat_id is None:
+            return
+        self._clear_terminal_progress(action.chat_id)
+        self._interactive_output_chats.add(action.chat_id)
 
     def _select_complete_output(self, buffered_text: str, final_text: str) -> str:
         buffered = buffered_text.strip()
@@ -1829,6 +1978,23 @@ def approval_decision_from_reactions(reactions) -> ApprovalDecision | None:
     return None
 
 
+def _bridge_restart_command(*, no_resume: bool = False) -> list[str]:
+    command = [sys.executable, "-m", "cli_courier.cli", "restart", "--detach", "--open-terminal"]
+    if no_resume:
+        command.append("--no-resume")
+    return command
+
+
+def _resume_requested(args: str) -> bool:
+    tokens = {token.lower() for token in args.split()}
+    return bool(tokens & {"resume", "--resume"})
+
+
+def _no_resume_requested(args: str) -> bool:
+    tokens = {token.lower() for token in args.split()}
+    return bool(tokens & {"fresh", "--fresh", "no-resume", "--no-resume"})
+
+
 def detect_interactive_choices(text: str) -> tuple[str, list[str], int] | None:
     """Detect narrow Codex terminal menus that require key navigation."""
     lines = [line.rstrip() for line in sanitize_terminal_text(text).splitlines()]
@@ -1857,12 +2023,28 @@ def detect_interactive_choices(text: str) -> tuple[str, list[str], int] | None:
     return None
 
 
-PROMPT_PLACEHOLDERS = {"{{prompt}}", "{prompt}", "<prompt>", "[prompt]"}
+PROMPT_PLACEHOLDERS = {"{{prompt}}", "{prompt}", "<prompt>", "[prompt]", "explain this codebase"}
 TERMINAL_CHOICE_PROMPTS = {
+    "select reasoning effort",
     "select model",
     "select model and effort",
 }
-TERMINAL_MODEL_LABEL_RE = re.compile(r"\b(?:gpt-[\w.-]+|codex)\b", re.IGNORECASE)
+TERMINAL_CHOICE_PROMPT_RE = re.compile(
+    r"^(?:select|choose|pick|switch|enable|apply|import|configure)\b.*",
+    re.IGNORECASE,
+)
+TERMINAL_NUMBERED_CHOICE_RE = re.compile(r"^\s*(\d+)\s*[.)]\s*(.+?)\s*$")
+TERMINAL_CHOICE_INSTRUCTION_PREFIXES = (
+    "access legacy models",
+    "current selected",
+    "loading ",
+    "no additional ",
+    "pick a quick ",
+    "press enter ",
+    "this updates ",
+    "type to search ",
+    "uses fewer ",
+)
 
 
 def _choice_prompt_text(event: AgentEvent) -> str | None:
@@ -1897,14 +2079,24 @@ def _looks_like_choice_placeholder(value: object) -> bool:
     if not text:
         return False
     first_line = text.splitlines()[0].strip().lstrip("›>").strip()
-    return first_line in PROMPT_PLACEHOLDERS
+    return first_line.lower() in PROMPT_PLACEHOLDERS
 
 
 def _find_terminal_choice_prompt(lines: list[str], selected_line_index: int) -> int | None:
     for index in range(selected_line_index - 1, max(-1, selected_line_index - 12), -1):
-        if lines[index].strip().lower() in TERMINAL_CHOICE_PROMPTS:
+        if _looks_like_terminal_choice_prompt(lines[index]):
             return index
     return None
+
+
+def _looks_like_terminal_choice_prompt(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    lowered = stripped.lower()
+    if any(lowered.startswith(prefix) for prefix in TERMINAL_CHOICE_INSTRUCTION_PREFIXES):
+        return False
+    return lowered in TERMINAL_CHOICE_PROMPTS or bool(TERMINAL_CHOICE_PROMPT_RE.match(stripped))
 
 
 def _terminal_choice_line_has_marker(line: str) -> bool:
@@ -1919,19 +2111,45 @@ def _terminal_choice_label(line: str) -> str:
         label = stripped[1:].strip()
     elif line.startswith(("  ", "\t")):
         label = stripped
+    elif TERMINAL_NUMBERED_CHOICE_RE.match(stripped):
+        label = stripped
     else:
         return ""
-    if not _looks_like_terminal_model_choice_label(label):
+    label = _strip_terminal_choice_number(label)
+    if not _looks_like_terminal_choice_label(label):
         return ""
     return label
 
 
-def _looks_like_terminal_model_choice_label(label: str) -> bool:
-    if not TERMINAL_MODEL_LABEL_RE.search(label):
+def _strip_terminal_choice_number(label: str) -> str:
+    match = TERMINAL_NUMBERED_CHOICE_RE.match(label)
+    if match is None:
+        return label
+    return match.group(2).strip()
+
+
+def _looks_like_terminal_choice_label(label: str) -> bool:
+    lowered = label.lower()
+    if not label or len(label) > 240:
         return False
     if "·" in label or "~/" in label:
         return False
-    return not label.lower().startswith(("tip:", "access legacy models", "pick a quick"))
+    if lowered in PROMPT_PLACEHOLDERS:
+        return False
+    if any(lowered.startswith(prefix) for prefix in TERMINAL_CHOICE_INSTRUCTION_PREFIXES):
+        return False
+    if lowered.startswith(("tip:", "warning:", "error:")):
+        return False
+    if lowered.startswith(("›", ">")):
+        return False
+    return True
+
+
+def _choice_button_label(index: int, label: str) -> str:
+    text = f"{index}. {label}"
+    if len(text) <= 64:
+        return text
+    return f"{text[:61].rstrip()}..."
 
 
 def normalize_echo_text(text: str) -> str:
@@ -2036,6 +2254,20 @@ def _image_suffix(file_name: str | None, mime_type: str | None) -> str:
         if suffix is not None:
             return suffix
     return ".jpg"
+
+
+def _safe_incoming_file_name(file_name: str | None) -> str:
+    if file_name:
+        name = Path(file_name).name
+    else:
+        name = "file"
+    safe_name = _safe_path_component(name).strip("._-")
+    return safe_name or "file"
+
+
+def _safe_path_component(value: object) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("._-")
+    return cleaned or "file"
 
 
 SCREENSHOT_SUMMARY_RE = re.compile(

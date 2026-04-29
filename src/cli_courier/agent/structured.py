@@ -20,6 +20,7 @@ class StructuredCodexProcess:
         adapter: AgentAdapter,
         cwd: Path,
         env_allowlist: tuple[str, ...] = (),
+        resume_last: bool = False,
     ) -> None:
         self.command = command
         self.adapter = adapter
@@ -27,7 +28,7 @@ class StructuredCodexProcess:
         self.env = build_agent_env(env_allowlist)
         self.output_queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
         self._running = False
-        self._has_started_turn = False
+        self._has_started_turn = resume_last and adapter.capabilities.supports_resume
         self._turn_lock = asyncio.Lock()
         self._process: asyncio.subprocess.Process | None = None
         self._turn_task: asyncio.Task[None] | None = None

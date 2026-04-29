@@ -125,8 +125,11 @@ Telegram polling begins.
 
 `clicourier run` is an interactive convenience wrapper. In desktop mode it creates the
 mute file, starts the bridge daemon with a tmux-backed agent, and attaches to the tmux
-session. In Telegram mode it removes the mute file and starts the same background daemon
-without attaching.
+session. In Telegram mode it removes the mute file, starts the same background daemon,
+and attaches to the tmux-backed agent when an agent command or configured default exists.
+Local `clicourier restart` also forces tmux for the restarted agent and attaches from an
+interactive terminal. Telegram `/restart` uses detached restart and reports the `tmux
+attach` command after asking the restarted CLI process to open a local desktop terminal.
 
 `NOTIFICATION_BLOCK_FILE` is a simple mute toggle. The generated default is `muted`, placed
 in the project working directory. When the file exists, proactive agent output and approval

@@ -126,6 +126,7 @@ class Settings(BaseSettings):
     agent_tmux_session: str | None = Field(default=None, alias="AGENT_TMUX_SESSION")
     agent_tmux_history_lines: int = Field(default=300, alias="AGENT_TMUX_HISTORY_LINES")
     suppress_agent_trace_lines: bool = Field(default=True, alias="SUPPRESS_AGENT_TRACE_LINES")
+    agent_resume_last: bool = Field(default=False, alias="AGENT_RESUME_LAST")
     agent_initial_prompt_enabled: bool = Field(default=True, alias="AGENT_INITIAL_PROMPT_ENABLED")
     agent_initial_prompt: str = Field(
         default=(
