@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import shlex
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Iterable, Protocol
 
 from cli_courier.security.terminal import sanitize_terminal_text
 
@@ -39,7 +39,7 @@ class AgentAdapter(Protocol):
         output_last_message_path: str | None = None,
     ) -> list[str]: ...
 
-    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "AgentEvent | None": ...
+    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "Iterable[AgentEvent]": ...
 
 
 @dataclass(frozen=True)
@@ -92,7 +92,7 @@ class BaseAdapter:
     ) -> list[str]:
         raise NotImplementedError(f"{self.id} does not support structured stream mode")
 
-    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "AgentEvent | None":
+    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "Iterable[AgentEvent]":
         raise NotImplementedError(f"{self.id} does not support structured stream mode")
 
 
@@ -166,7 +166,7 @@ class CodexAdapter(BaseAdapter):
             return base if "--last" in base else [base[0], "resume", "--last", *base[2:]]
         return [base[0], "resume", "--last", *base[1:]]
 
-    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "AgentEvent | None":
+    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "Iterable[AgentEvent]":
         from cli_courier.agent.codex_jsonl import parse_codex_jsonl_line
 
         return parse_codex_jsonl_line(line, session_id=session_id)
@@ -234,7 +234,7 @@ class ClaudeAdapter(BaseAdapter):
             result.append("--continue")
         return result
 
-    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "AgentEvent | None":
+    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "Iterable[AgentEvent]":
         from cli_courier.agent.claude_jsonl import parse_claude_jsonl_line
 
         return parse_claude_jsonl_line(line, session_id=session_id)
@@ -247,10 +247,56 @@ class GeminiAdapter(BaseAdapter):
             display_name="Gemini CLI",
             default_command=("gemini",),
             approval_patterns=GENERIC_APPROVAL_PATTERNS,
-            capabilities=AdapterCapabilities(requires_pty=True),
+            capabilities=AdapterCapabilities(
+                supports_structured_stream=True,
+                supports_resume=True,
+                supports_partial_final=True,
+                supports_approval_events=False,
+                supports_file_events=False,
+                requires_pty=False,
+            ),
             approve_input="y",
             reject_input="n",
         )
+
+    def build_structured_turn_command(
+        self,
+        command: list[str],
+        *,
+        prompt: str,
+        cwd: str,
+        resume: bool,
+        output_last_message_path: str | None = None,
+    ) -> list[str]:
+        if not command:
+            raise ValueError("agent command must not be empty")
+        result = list(command)
+        if not _has_option_with_value(result, "--output-format") and "-o" not in result:
+            result.extend(["--output-format", "stream-json"])
+        if "-y" not in result and "--yolo" not in result and "--approval-mode" not in result:
+            result.append("--yolo")
+        if "--skip-trust" not in result:
+            result.append("--skip-trust")
+        if resume and "-r" not in result and "--resume" not in result:
+            result.extend(["--resume", "latest"])
+
+        # gemini requires --prompt for non-interactive mode
+        if "-p" not in result and "--prompt" not in result:
+            result.extend(["--prompt", prompt])
+        else:
+            result.append(prompt)
+        return result
+
+    def build_resume_command(self, command: list[str]) -> list[str]:
+        result = list(command)
+        if "-r" not in result and "--resume" not in result:
+            result.extend(["--resume", "latest"])
+        return result
+
+    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> Iterable["AgentEvent"]:
+        from cli_courier.agent.gemini_jsonl import parse_gemini_jsonl_line
+
+        return parse_gemini_jsonl_line(line, session_id=session_id)
 
 
 def list_adapters() -> dict[str, AgentAdapter]:

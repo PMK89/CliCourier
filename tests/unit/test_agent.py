@@ -430,9 +430,10 @@ def test_codex_jsonl_maps_session_and_final_message() -> None:
 
 
 def test_codex_jsonl_maps_commentary_assistant_message_to_delta() -> None:
-    event = parse_codex_jsonl_line(
+    events = list(parse_codex_jsonl_line(
         '{"type":"assistant_message","channel":"commentary","message":"Working on it."}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.ASSISTANT_DELTA
@@ -440,10 +441,11 @@ def test_codex_jsonl_maps_commentary_assistant_message_to_delta() -> None:
 
 
 def test_codex_jsonl_maps_tool_events() -> None:
-    event = parse_codex_jsonl_line(
+    events = list(parse_codex_jsonl_line(
         '{"type":"response_item","item":{"type":"function_call","name":"shell",'
         '"arguments":"{\\"cmd\\":\\"pytest\\"}","call_id":"call_1"}}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.TOOL_STARTED
@@ -452,10 +454,11 @@ def test_codex_jsonl_maps_tool_events() -> None:
 
 
 def test_codex_jsonl_maps_response_item_commentary_message_to_delta() -> None:
-    event = parse_codex_jsonl_line(
+    events = list(parse_codex_jsonl_line(
         '{"type":"response_item","item":{"type":"message","role":"assistant",'
         '"channel":"commentary","content":[{"type":"output_text","text":"Progress update"}]}}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.ASSISTANT_DELTA
@@ -463,10 +466,11 @@ def test_codex_jsonl_maps_response_item_commentary_message_to_delta() -> None:
 
 
 def test_codex_jsonl_maps_tool_output() -> None:
-    event = parse_codex_jsonl_line(
+    events = list(parse_codex_jsonl_line(
         '{"type":"response_item","item":{"type":"function_call_output",'
         '"output":"tests passed","call_id":"call_1"}}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.TOOL_COMPLETED
@@ -486,10 +490,11 @@ def test_structured_final_message_keeps_longer_streamed_text_without_output_file
 
 
 def test_codex_jsonl_maps_approval_request() -> None:
-    event = parse_codex_jsonl_line(
+    events = list(parse_codex_jsonl_line(
         '{"type":"approval_requested","id":"approval_1","message":"Run tests?",'
         '"choices":[{"id":"approve","label":"Approve"},{"id":"reject","label":"Reject"}]}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.APPROVAL_REQUESTED
@@ -498,11 +503,12 @@ def test_codex_jsonl_maps_approval_request() -> None:
 
 
 def test_codex_jsonl_maps_choice_request() -> None:
-    event = parse_codex_jsonl_line(
+    events = list(parse_codex_jsonl_line(
         '{"type":"choice_request","prompt":"Select model",'
         '"choices":[{"id":"1","label":"gpt-5.5","value":"gpt-5.5"},'
         '{"id":"2","label":"gpt-5","value":"gpt-5"}]}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.CHOICE_REQUEST
@@ -514,10 +520,11 @@ def test_codex_jsonl_maps_choice_request() -> None:
 
 
 def test_codex_jsonl_prefers_prompt_over_placeholder_text_for_choice_request() -> None:
-    event = parse_codex_jsonl_line(
+    events = list(parse_codex_jsonl_line(
         '{"type":"choice_request","text":"{{prompt}}","prompt":"Select model",'
         '"choices":[{"id":"1","label":"gpt-5.5","value":"gpt-5.5"}]}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.CHOICE_REQUEST
@@ -525,28 +532,29 @@ def test_codex_jsonl_prefers_prompt_over_placeholder_text_for_choice_request() -
 
 
 def test_codex_jsonl_drops_placeholder_only_choice_request() -> None:
-    event = parse_codex_jsonl_line(
+    events = list(parse_codex_jsonl_line(
         '{"type":"choice_request","text":"› {{prompt}}\\n  Write the answer here",'
         '"choices":[{"id":"1","label":"Write the answer here","value":"1"}]}'
-    )
+    ))
 
-    assert event is None
+    assert not events
 
 
 def test_codex_jsonl_drops_explain_codebase_placeholder_only_choice_request() -> None:
-    event = parse_codex_jsonl_line(
+    events = list(parse_codex_jsonl_line(
         '{"type":"choice_request","text":"Explain this codebase",'
         '"choices":[{"id":"1","label":"Write the answer here","value":"1"}]}'
-    )
+    ))
 
-    assert event is None
+    assert not events
 
 
 def test_codex_jsonl_filters_prompt_placeholder_choice_labels() -> None:
-    event = parse_codex_jsonl_line(
+    events = list(parse_codex_jsonl_line(
         '{"type":"choice_request","prompt":"Select model",'
         '"choices":["{{prompt}}",{"id":"2","label":"gpt-5","value":"gpt-5"}]}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.CHOICE_REQUEST
@@ -633,10 +641,11 @@ def test_claude_adapter_does_not_duplicate_continue_flag() -> None:
 
 
 def test_claude_jsonl_maps_system_init_to_session_started() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-sonnet-4-6",'
         '"cwd":"/tmp","permissionMode":"bypassPermissions"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.SESSION_STARTED
@@ -645,9 +654,10 @@ def test_claude_jsonl_maps_system_init_to_session_started() -> None:
 
 
 def test_claude_jsonl_maps_system_status_to_debug_status() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"system","subtype":"status","status":"requesting","session_id":"sess-1"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.STATUS
@@ -655,10 +665,11 @@ def test_claude_jsonl_maps_system_status_to_debug_status() -> None:
 
 
 def test_claude_jsonl_maps_assistant_text_to_delta() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"assistant","message":{"content":[{"type":"text","text":"Hello!"}],'
         '"stop_reason":null},"session_id":"sess-1"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.ASSISTANT_DELTA
@@ -667,11 +678,12 @@ def test_claude_jsonl_maps_assistant_text_to_delta() -> None:
 
 
 def test_claude_jsonl_maps_assistant_tool_use_to_tool_started() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01",'
         '"name":"Bash","input":{"command":"ls -la","description":"List files"}}],'
         '"stop_reason":null},"session_id":"sess-1"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.TOOL_STARTED
@@ -681,10 +693,11 @@ def test_claude_jsonl_maps_assistant_tool_use_to_tool_started() -> None:
 
 
 def test_claude_jsonl_maps_assistant_thinking_to_reasoning() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"I should run ls.",'
         '"signature":"sig"}],"stop_reason":null},"session_id":"sess-1"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.REASONING
@@ -693,12 +706,13 @@ def test_claude_jsonl_maps_assistant_thinking_to_reasoning() -> None:
 
 
 def test_claude_jsonl_prefers_tool_use_over_text_in_same_message() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"assistant","message":{"content":['
         '{"type":"tool_use","id":"toolu_01","name":"Edit","input":{"path":"/f","content":"x"}},'
         '{"type":"text","text":"Done."}'
         '],"stop_reason":null},"session_id":"sess-1"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.TOOL_STARTED
@@ -706,10 +720,11 @@ def test_claude_jsonl_prefers_tool_use_over_text_in_same_message() -> None:
 
 
 def test_claude_jsonl_maps_user_tool_result_to_tool_completed() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01",'
         '"type":"tool_result","content":"hello_world","is_error":false}]},"session_id":"sess-1"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.TOOL_COMPLETED
@@ -718,10 +733,11 @@ def test_claude_jsonl_maps_user_tool_result_to_tool_completed() -> None:
 
 
 def test_claude_jsonl_maps_user_tool_result_error_to_tool_failed() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01",'
         '"type":"tool_result","content":"Permission denied","is_error":true}]},"session_id":"sess-1"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.TOOL_FAILED
@@ -729,10 +745,11 @@ def test_claude_jsonl_maps_user_tool_result_error_to_tool_failed() -> None:
 
 
 def test_claude_jsonl_maps_tool_result_content_list() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01",'
         '"type":"tool_result","content":[{"type":"text","text":"file1\\nfile2"}],"is_error":false}]}}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.TOOL_COMPLETED
@@ -740,10 +757,11 @@ def test_claude_jsonl_maps_tool_result_content_list() -> None:
 
 
 def test_claude_jsonl_maps_result_success_to_final_message() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"result","subtype":"success","is_error":false,"result":"Done!",'
         '"session_id":"sess-1","stop_reason":"end_turn"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.FINAL_MESSAGE
@@ -752,10 +770,11 @@ def test_claude_jsonl_maps_result_success_to_final_message() -> None:
 
 
 def test_claude_jsonl_maps_result_error_to_error_event() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"result","subtype":"error_max_turns","is_error":true,'
         '"result":"Max turns reached","session_id":"sess-1"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.ERROR
@@ -763,9 +782,10 @@ def test_claude_jsonl_maps_result_error_to_error_event() -> None:
 
 
 def test_claude_jsonl_maps_rate_limit_event_to_debug_status() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"},"session_id":"sess-1"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.STATUS
@@ -773,9 +793,10 @@ def test_claude_jsonl_maps_rate_limit_event_to_debug_status() -> None:
 
 
 def test_claude_jsonl_maps_stream_event_to_debug_status() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"stream_event","event":{"type":"message_start"},"session_id":"sess-1"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.STATUS
@@ -783,21 +804,23 @@ def test_claude_jsonl_maps_stream_event_to_debug_status() -> None:
 
 
 def test_claude_jsonl_propagates_session_id_from_top_level() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],'
         '"stop_reason":null},"session_id":"uuid-123"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.session_id == "uuid-123"
 
 
 def test_claude_jsonl_session_id_parameter_takes_precedence() -> None:
-    event = parse_claude_jsonl_line(
+    events = list(parse_claude_jsonl_line(
         '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],'
         '"stop_reason":null},"session_id":"from-payload"}',
         session_id="from-param",
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.session_id == "from-param"
@@ -805,9 +828,10 @@ def test_claude_jsonl_session_id_parameter_takes_precedence() -> None:
 
 def test_claude_adapter_delegates_parse_jsonl_line() -> None:
     adapter = ClaudeAdapter()
-    event = adapter.parse_jsonl_line(
+    events = list(adapter.parse_jsonl_line(
         '{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"s1"}'
-    )
+    ))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.FINAL_MESSAGE
@@ -816,7 +840,8 @@ def test_claude_adapter_delegates_parse_jsonl_line() -> None:
 
 def test_codex_adapter_delegates_parse_jsonl_line() -> None:
     adapter = CodexAdapter()
-    event = adapter.parse_jsonl_line('{"type":"agent_message","message":"Done."}')
+    events = list(adapter.parse_jsonl_line('{"type":"agent_message","message":"Done."}'))
+    event = events[0] if events else None
 
     assert event is not None
     assert event.kind == AgentEventKind.FINAL_MESSAGE

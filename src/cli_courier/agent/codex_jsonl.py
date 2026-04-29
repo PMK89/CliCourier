@@ -9,27 +9,29 @@ from cli_courier.agent.events import AgentEvent, AgentEventKind
 PROMPT_PLACEHOLDERS = {"{{prompt}}", "{prompt}", "<prompt>", "[prompt]", "explain this codebase"}
 
 
-def parse_codex_jsonl_line(line: str, *, session_id: str | None = None) -> AgentEvent | None:
+def parse_codex_jsonl_line(line: str, *, session_id: str | None = None) -> Iterable[AgentEvent]:
     stripped = line.strip()
     if not stripped:
-        return None
+        return
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError as exc:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.ERROR,
             text=f"Invalid Codex JSONL event: {exc}",
             session_id=session_id,
             data={"line": stripped},
         )
+        return
     if not isinstance(payload, dict):
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.STATUS,
             text=str(payload),
             session_id=session_id,
             data={"raw": payload},
         )
-    return codex_payload_to_event(payload, session_id=session_id)
+        return
+    yield from codex_payload_to_events(payload, session_id=session_id)
 
 
 def parse_codex_jsonl_lines(
@@ -39,17 +41,16 @@ def parse_codex_jsonl_lines(
 ) -> list[AgentEvent]:
     events = []
     for line in lines:
-        event = parse_codex_jsonl_line(line, session_id=session_id)
-        if event is not None:
+        for event in parse_codex_jsonl_line(line, session_id=session_id):
             events.append(event)
     return events
 
 
-def codex_payload_to_event(
+def codex_payload_to_events(
     payload: dict[str, Any],
     *,
     session_id: str | None = None,
-) -> AgentEvent | None:
+) -> Iterable[AgentEvent]:
     event_type = _event_type(payload)
     normalized_type = _normalize_type(event_type)
     native_session_id = _first_str(payload, "session_id", "sessionId", "conversation_id", "id")
@@ -57,31 +58,34 @@ def codex_payload_to_event(
     turn_id = _first_str(payload, "turn_id", "turnId")
 
     if normalized_type in {"session_started", "session_configured", "session_created"}:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.SESSION_STARTED,
             text=_status_text(payload) or "Codex session started.",
             session_id=session_id,
             turn_id=turn_id,
             data=payload,
         )
+        return
     if normalized_type in {"turn_started", "task_started"}:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.TURN_STARTED,
             text=_status_text(payload) or "Turn started.",
             session_id=session_id,
             turn_id=turn_id,
             data=payload,
         )
+        return
     if normalized_type in {"turn_completed", "task_completed"}:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.TURN_COMPLETED,
             text=_status_text(payload) or "Turn completed.",
             session_id=session_id,
             turn_id=turn_id,
             data=payload,
         )
+        return
     if normalized_type in {"turn_failed", "task_failed"}:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.TURN_FAILED,
             text=_text(payload) or "Turn failed.",
             session_id=session_id,
@@ -89,24 +93,27 @@ def codex_payload_to_event(
             is_debug=False,
             data=payload,
         )
+        return
     if normalized_type in {"agent_message_delta", "assistant_delta", "message_delta"}:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.ASSISTANT_DELTA,
             text=_delta(payload),
             session_id=session_id,
             turn_id=turn_id,
             data=payload,
         )
+        return
     if normalized_type in {"agent_message", "assistant_message", "final_message", "final_answer"}:
-        return AgentEvent(
+        yield AgentEvent(
             kind=_assistant_message_kind(payload, normalized_type=normalized_type),
             text=_text(payload),
             session_id=session_id,
             turn_id=turn_id,
             data=payload,
         )
+        return
     if normalized_type in {"reasoning", "reasoning_delta", "agent_reasoning"}:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.REASONING,
             text=_delta(payload) or _text(payload),
             session_id=session_id,
@@ -114,20 +121,29 @@ def codex_payload_to_event(
             is_debug=True,
             data=payload,
         )
+        return
     if normalized_type in {"tool_started", "tool_call", "function_call", "exec_command_begin"}:
-        return _tool_event(AgentEventKind.TOOL_STARTED, payload, session_id=session_id, turn_id=turn_id)
+        yield _tool_event(AgentEventKind.TOOL_STARTED, payload, session_id=session_id, turn_id=turn_id)
+        return
     if normalized_type in {"tool_delta", "tool_output_delta", "exec_command_output"}:
-        return _tool_event(AgentEventKind.TOOL_DELTA, payload, session_id=session_id, turn_id=turn_id)
+        yield _tool_event(AgentEventKind.TOOL_DELTA, payload, session_id=session_id, turn_id=turn_id)
+        return
     if normalized_type in {"tool_completed", "tool_result", "function_call_output", "exec_command_end"}:
-        return _tool_event(AgentEventKind.TOOL_COMPLETED, payload, session_id=session_id, turn_id=turn_id)
+        yield _tool_event(AgentEventKind.TOOL_COMPLETED, payload, session_id=session_id, turn_id=turn_id)
+        return
     if normalized_type in {"tool_failed", "exec_command_failed"}:
-        return _tool_event(AgentEventKind.TOOL_FAILED, payload, session_id=session_id, turn_id=turn_id)
+        yield _tool_event(AgentEventKind.TOOL_FAILED, payload, session_id=session_id, turn_id=turn_id)
+        return
     if normalized_type in {"approval_requested", "approval_request"}:
-        return _approval_event(payload, session_id=session_id, turn_id=turn_id)
+        yield _approval_event(payload, session_id=session_id, turn_id=turn_id)
+        return
     if normalized_type in {"choice_request", "choice_requested", "selection_request", "selection_requested"}:
-        return _choice_event(payload, session_id=session_id, turn_id=turn_id)
+        event = _choice_event(payload, session_id=session_id, turn_id=turn_id)
+        if event:
+            yield event
+        return
     if normalized_type in {"approval_resolved", "approval_decision"}:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.APPROVAL_RESOLVED,
             text=_text(payload) or "Approval resolved.",
             session_id=session_id,
@@ -135,8 +151,9 @@ def codex_payload_to_event(
             approval_id=_first_str(payload, "approval_id", "id"),
             data=payload,
         )
+        return
     if normalized_type in {"file_changed", "file_modified", "patch_applied"}:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.FILE_CHANGED,
             text=_text(payload) or _first_str(payload, "path", "file") or "File changed.",
             session_id=session_id,
@@ -144,8 +161,9 @@ def codex_payload_to_event(
             artifact_path=_first_str(payload, "path", "file"),
             data=payload,
         )
+        return
     if normalized_type in {"artifact_available", "artifact"}:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.ARTIFACT_AVAILABLE,
             text=_text(payload) or _first_str(payload, "path") or "Artifact available.",
             session_id=session_id,
@@ -153,8 +171,9 @@ def codex_payload_to_event(
             artifact_path=_first_str(payload, "path"),
             data=payload,
         )
+        return
     if normalized_type in {"screenshot_available", "screenshot"}:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.SCREENSHOT_AVAILABLE,
             text=_text(payload) or _first_str(payload, "path") or "Screenshot available.",
             session_id=session_id,
@@ -162,20 +181,23 @@ def codex_payload_to_event(
             screenshot_path=_first_str(payload, "path"),
             data=payload,
         )
+        return
     if normalized_type in {"error", "fatal_error"}:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.ERROR,
             text=_text(payload) or "Codex reported an error.",
             session_id=session_id,
             turn_id=turn_id,
             data=payload,
         )
+        return
     if normalized_type == "response_item":
         item = payload.get("item")
         if isinstance(item, dict):
-            return _response_item_to_event(payload, item, session_id=session_id, turn_id=turn_id)
+            yield _response_item_to_event(payload, item, session_id=session_id, turn_id=turn_id)
+            return
 
-    return AgentEvent(
+    yield AgentEvent(
         kind=AgentEventKind.STATUS,
         text=_status_text(payload) or _text(payload) or event_type,
         session_id=session_id,

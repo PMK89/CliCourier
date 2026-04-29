@@ -112,18 +112,17 @@ class StructuredAgentProcess:
                 assert self._process.stdout is not None
                 stderr_task = asyncio.create_task(self._read_stderr(self._process))
                 async for raw_line in self._process.stdout:
-                    event = self.adapter.parse_jsonl_line(
+                    events = self.adapter.parse_jsonl_line(
                         raw_line.decode("utf-8", errors="replace"),
                         session_id=self.adapter.id,
                     )
-                    if event is None:
-                        continue
-                    if event.kind == AgentEventKind.FINAL_MESSAGE:
-                        final_message_text = _select_final_message_text(final_message_text, event.text)
-                        continue
-                    if event.kind in {AgentEventKind.TURN_STARTED, AgentEventKind.TURN_COMPLETED}:
-                        continue
-                    await self.output_queue.put(event)
+                    for event in events:
+                        if event.kind == AgentEventKind.FINAL_MESSAGE:
+                            final_message_text = _select_final_message_text(final_message_text, event.text)
+                            continue
+                        if event.kind in {AgentEventKind.TURN_STARTED, AgentEventKind.TURN_COMPLETED}:
+                            continue
+                        await self.output_queue.put(event)
                 returncode = await self._process.wait()
                 await stderr_task
                 final_text = _select_final_message_text(final_message_text, _read_output_file(output_path))

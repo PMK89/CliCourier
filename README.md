@@ -13,7 +13,7 @@ workstation where Telegram is the remote control surface, not the security bound
 - Telegram allowlist gate before every handler.
 - Configured CLI agent only; Telegram users cannot run arbitrary shell commands.
 - Codex CLI adapter, Claude/Gemini fallback adapters, and a generic adapter for testing.
-- Codex structured JSONL sessions through `codex exec --json` by default.
+- Structured JSONL sessions: Codex via `codex exec --json`, Claude Code via `claude --print --output-format stream-json`.
 - Terminal-backed tmux/PTY sessions remain available as fallback for TUI-first agents.
 - One throttled Telegram dashboard message per active session, plus a dedicated `/progress` rolling message and separate final/error/artifact messages.
 - Event-backed approvals with explicit `/approve`, `/reject`, reactions, and pending-action buttons.
@@ -170,11 +170,28 @@ clicourier stop
 ```
 
 Any CLI command can be used after `--`, for example `claude` or `gemini`. For non-Codex
-tools use `DEFAULT_AGENT_ADAPTER=generic`; setup infers this for common non-Codex commands.
-The Codex adapter starts structured turns with `codex exec --json <prompt>`. Follow-up
-turns use `codex exec resume --last --json <prompt>`, so final answers, tool events,
-approval requests, and status updates arrive as JSONL events instead of terminal text.
-`clicourier restart` and Telegram `/restart` resume the most recent Codex session by
+tools set `DEFAULT_AGENT_ADAPTER` to the matching adapter id (`claude`, `gemini`, or
+`generic`); setup infers this for common commands.
+
+**Codex** (`DEFAULT_AGENT_ADAPTER=codex`): starts structured turns with
+`codex exec --json <prompt>`; follow-up turns use `codex exec resume --last --json
+<prompt>`.
+
+**Claude Code** (`DEFAULT_AGENT_ADAPTER=claude`): starts structured turns with
+`claude --print --output-format stream-json --verbose [--continue] <prompt>`.
+Because CliCourier drives Claude in non-interactive `--print` mode, interactive
+permission prompts cannot be answered. You must pass `--dangerously-skip-permissions`
+(or `--permission-mode bypassPermissions`) in your agent command so that tool calls are
+not blocked:
+
+```bash
+clicourier start -- claude --dangerously-skip-permissions
+```
+
+Or set `DEFAULT_AGENT_COMMAND=claude --dangerously-skip-permissions` in `.env`.
+
+Final answers, tool events, and status updates arrive as JSONL events for both Codex and
+Claude. `clicourier restart` and Telegram `/restart` resume the most recent session by
 default; pass `--no-resume` for a fresh session. Local `clicourier restart` starts the
 agent in tmux and attaches when run from an interactive terminal; use `--detach` to
 restart without attaching. Telegram `/restart` uses detached restart, opens a local
@@ -241,8 +258,11 @@ without Codex, Claude, Gemini, or a Telegram bot token.
 ## Known limitations
 
 - The MVP is still single-user and single active agent session.
-- Claude and Gemini are prepared through adapter capability flags, but structured
-  stream-json mappings are not implemented yet.
+- Claude Code structured stream-json (`--print --output-format stream-json`) is fully
+  implemented. Gemini uses the PTY/tmux fallback.
+- Claude Code requires `--dangerously-skip-permissions` (or `--permission-mode
+  bypassPermissions`) in the agent command when running in `--print` mode, because
+  interactive permission prompts cannot be answered over a non-interactive stdin.
 - PTY/tmux fallback can only expose raw terminal deltas; structured streams are preferred
   whenever an agent supports them because they provide explicit turn completion.
 - The Telegram chat UI is optimized for approvals, final answers, files, and screenshots,

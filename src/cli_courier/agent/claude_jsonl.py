@@ -1,58 +1,64 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Iterable
 
 from cli_courier.agent.events import AgentEvent, AgentEventKind
 
 
-def parse_claude_jsonl_line(line: str, *, session_id: str | None = None) -> AgentEvent | None:
+def parse_claude_jsonl_line(line: str, *, session_id: str | None = None) -> Iterable[AgentEvent]:
     stripped = line.strip()
     if not stripped:
-        return None
+        return
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError as exc:
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.ERROR,
             text=f"Invalid Claude Code JSON event: {exc}",
             session_id=session_id,
             data={"line": stripped},
         )
+        return
     if not isinstance(payload, dict):
-        return AgentEvent(
+        yield AgentEvent(
             kind=AgentEventKind.STATUS,
             text=str(payload),
             session_id=session_id,
             is_debug=True,
             data={"raw": payload},
         )
-    return _payload_to_event(payload, session_id=session_id)
+        return
+    yield from _payload_to_events(payload, session_id=session_id)
 
 
-def _payload_to_event(payload: dict[str, Any], *, session_id: str | None) -> AgentEvent | None:
+def _payload_to_events(payload: dict[str, Any], *, session_id: str | None) -> Iterable[AgentEvent]:
     event_type = payload.get("type", "")
     native_session_id = payload.get("session_id")
     resolved_session_id = session_id or native_session_id
 
     if event_type == "system":
-        return _handle_system(payload, session_id=resolved_session_id)
+        yield _handle_system(payload, session_id=resolved_session_id)
+        return
 
     if event_type == "assistant":
         message = payload.get("message")
         if isinstance(message, dict):
-            return _handle_assistant_message(message, payload, session_id=resolved_session_id)
+            yield from _handle_assistant_message(message, payload, session_id=resolved_session_id)
+        return
 
     if event_type == "user":
         message = payload.get("message")
         if isinstance(message, dict):
-            return _handle_user_message(message, payload, session_id=resolved_session_id)
+            yield from _handle_user_message(message, payload, session_id=resolved_session_id)
+        return
 
     if event_type == "result":
-        return _handle_result(payload, session_id=resolved_session_id)
+        yield _handle_result(payload, session_id=resolved_session_id)
+        return
 
     # rate_limit_event, stream_event, and other internal events
-    return AgentEvent(
+    yield AgentEvent(
         kind=AgentEventKind.STATUS,
         text=event_type or "event",
         session_id=resolved_session_id,
@@ -85,13 +91,11 @@ def _handle_assistant_message(
     payload: dict[str, Any],
     *,
     session_id: str | None,
-) -> AgentEvent | None:
+) -> Iterable[AgentEvent]:
     content = message.get("content", [])
     if not isinstance(content, list):
-        return None
+        return
 
-    # Iterate content blocks; prefer tool_use > text > thinking
-    text_event: AgentEvent | None = None
     for block in content:
         if not isinstance(block, dict):
             continue
@@ -101,7 +105,7 @@ def _handle_assistant_message(
             tool_name = block.get("name") or "tool"
             tool_input = block.get("input") or {}
             text = _format_tool_input(tool_name, tool_input)
-            return AgentEvent(
+            yield AgentEvent(
                 kind=AgentEventKind.TOOL_STARTED,
                 text=text,
                 session_id=session_id,
@@ -110,27 +114,26 @@ def _handle_assistant_message(
                 data=payload,
             )
 
-        if block_type == "text" and text_event is None:
+        elif block_type == "text":
             text = block.get("text", "")
             if text:
-                text_event = AgentEvent(
+                yield AgentEvent(
                     kind=AgentEventKind.ASSISTANT_DELTA,
                     text=text,
                     session_id=session_id,
                     data=payload,
                 )
 
-        if block_type == "thinking" and text_event is None:
+        elif block_type == "thinking":
             thinking = block.get("thinking", "")
-            text_event = AgentEvent(
-                kind=AgentEventKind.REASONING,
-                text=thinking,
-                session_id=session_id,
-                is_debug=True,
-                data=payload,
-            )
-
-    return text_event
+            if thinking:
+                yield AgentEvent(
+                    kind=AgentEventKind.REASONING,
+                    text=thinking,
+                    session_id=session_id,
+                    is_debug=True,
+                    data=payload,
+                )
 
 
 def _handle_user_message(
@@ -138,10 +141,10 @@ def _handle_user_message(
     payload: dict[str, Any],
     *,
     session_id: str | None,
-) -> AgentEvent | None:
+) -> Iterable[AgentEvent]:
     content = message.get("content", [])
     if not isinstance(content, list):
-        return None
+        return
 
     for block in content:
         if not isinstance(block, dict):
@@ -157,15 +160,13 @@ def _handle_user_message(
                 stdout = tool_use_result.get("stdout", "")
                 stderr = tool_use_result.get("stderr", "")
                 text = stdout or stderr
-            return AgentEvent(
+            yield AgentEvent(
                 kind=AgentEventKind.TOOL_FAILED if is_error else AgentEventKind.TOOL_COMPLETED,
                 text=text,
                 session_id=session_id,
                 tool_call_id=tool_call_id,
                 data=payload,
             )
-
-    return None
 
 
 def _handle_result(payload: dict[str, Any], *, session_id: str | None) -> AgentEvent:
