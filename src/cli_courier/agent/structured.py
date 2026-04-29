@@ -73,7 +73,8 @@ class StructuredAgentProcess:
     async def send_approval(self, text: str) -> None:
         process = self._process
         if process is None or process.returncode is not None or process.stdin is None:
-            raise RuntimeError("no active approval prompt is waiting for input")
+            await self.send_line(text)
+            return
         process.stdin.write((text.rstrip("\r\n") + "\n").encode())
         await process.stdin.drain()
 

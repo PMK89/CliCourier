@@ -59,6 +59,26 @@ class FasterWhisperTranscriber:
         self.compute_type = compute_type
         self.model_dir = model_dir
         self.ffmpeg_binary = ffmpeg_binary
+        self._whisper_model: object | None = None  # lazy-loaded once and reused
+
+    def _get_model(self) -> object:
+        if self._whisper_model is not None:
+            return self._whisper_model
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise RuntimeError(
+                "faster-whisper is not installed. Reinstall CliCourier with uv or pipx."
+            ) from exc
+        kwargs: dict[str, str] = {
+            "device": self.device,
+            "compute_type": self.compute_type,
+        }
+        if self.model_dir is not None:
+            self.model_dir.mkdir(parents=True, exist_ok=True)
+            kwargs["download_root"] = str(self.model_dir)
+        self._whisper_model = WhisperModel(self.model, **kwargs)
+        return self._whisper_model
 
     async def transcribe(self, path: Path) -> str:
         return await asyncio.to_thread(self._transcribe_sync, path)
@@ -72,23 +92,11 @@ class FasterWhisperTranscriber:
                 ffmpeg_binary=self.ffmpeg_binary,
             )
             try:
-                from faster_whisper import WhisperModel
-            except ImportError as exc:
-                raise RuntimeError(
-                    "faster-whisper is not installed. Reinstall CliCourier with uv or pipx."
-                ) from exc
-
-            kwargs: dict[str, str] = {
-                "device": self.device,
-                "compute_type": self.compute_type,
-            }
-            if self.model_dir is not None:
-                self.model_dir.mkdir(parents=True, exist_ok=True)
-                kwargs["download_root"] = str(self.model_dir)
-            try:
-                model = WhisperModel(self.model, **kwargs)
+                model = self._get_model()
                 segments, _info = model.transcribe(str(wav_path))
                 transcript = " ".join(segment.text.strip() for segment in segments).strip()
+            except RuntimeError:
+                raise
             except Exception as exc:  # noqa: BLE001 - convert backend errors into operator action
                 raise RuntimeError(
                     "local Whisper transcription failed. Check ffmpeg, faster-whisper, and "

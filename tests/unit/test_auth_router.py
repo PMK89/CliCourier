@@ -433,6 +433,7 @@ class FakeMessage:
 
     def __init__(self) -> None:
         self.replies: list[str] = []
+        self.deleted = False
         self.text: str | None = None
         self.caption: str | None = None
         self.voice = None
@@ -442,6 +443,9 @@ class FakeMessage:
 
     async def reply_text(self, text: str, **kwargs) -> None:
         self.replies.append(text)
+
+    async def delete(self) -> None:
+        self.deleted = True
 
 
 class FakeBot:
@@ -854,7 +858,8 @@ async def test_approval_callback_requires_matching_pending_action(tmp_path: Path
     bridge._stop_typing(100)
     assert state.active_agent.sent == ["y"]
     assert state.pending_action(action.id) is None
-    assert query.edits == ["Sent approve."]
+    assert query.edits == []
+    assert query.message.deleted
 
 
 async def test_approval_callback_rejects_wrong_chat(tmp_path: Path) -> None:

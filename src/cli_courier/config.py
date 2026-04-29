@@ -138,6 +138,10 @@ class Settings(BaseSettings):
         ),
         alias="AGENT_INITIAL_PROMPT",
     )
+    chat_history_enabled: bool = Field(default=True, alias="CHAT_HISTORY_ENABLED")
+    chat_history_dir: Path | None = Field(default=None, alias="CHAT_HISTORY_DIR")
+    chat_history_tail_lines: int = Field(default=20, alias="CHAT_HISTORY_TAIL_LINES")
+
     auto_start_agent: bool = Field(default=False, alias="AUTO_START_AGENT")
     default_telegram_chat_id: int | None = Field(default=None, alias="DEFAULT_TELEGRAM_CHAT_ID")
     notification_block_file: Path = Field(
@@ -195,7 +199,7 @@ class Settings(BaseSettings):
             return None
         return Path(value).expanduser().resolve()
 
-    @field_validator("whisper_cpp_binary", "whisper_cpp_model", "whisper_model_dir", mode="before")
+    @field_validator("whisper_cpp_binary", "whisper_cpp_model", "whisper_model_dir", "chat_history_dir", mode="before")
     @classmethod
     def normalize_optional_path(cls, value: Any) -> Path | None:
         if value is None or str(value).strip() == "":
@@ -232,6 +236,7 @@ class Settings(BaseSettings):
         "screenshot_max_bytes",
         "whisper_cpp_timeout_seconds",
         "agent_tmux_history_lines",
+        "chat_history_tail_lines",
     )
     @classmethod
     def validate_positive_limit(cls, value: int) -> int:

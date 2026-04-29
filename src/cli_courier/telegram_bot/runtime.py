@@ -46,6 +46,8 @@ from cli_courier.telegram_bot.output_renderer import (
     TELEGRAM_SAFE_LIMIT,
 )
 from cli_courier.telegram_bot.router import RouteKind, route_text
+from cli_courier.chat_history import ChatHistory
+from cli_courier.local_config import default_data_dir
 from cli_courier.voice import (
     DisabledTranscriber,
     FasterWhisperTranscriber,
@@ -74,10 +76,12 @@ class TelegramBridgeBot:
         self.sandbox = sandbox
         self.screenshot_service = screenshot_service
         self.transcriber = transcriber
+        self._configured_adapter_id = settings.default_agent_adapter
         self._flush_tasks: set[asyncio.Task[None]] = set()
         self._typing_tasks: dict[int, asyncio.Task[None]] = {}
         self._last_approval_signature: str | None = None
         self._last_choice_signature: str | None = None
+        self._chat_histories: dict[int, ChatHistory] = {}
         self._screenshot_watch_since_by_chat: dict[int, float] = {}
         self._sent_screenshot_paths: set[Path] = set()
         self._agent_input_echoes_by_chat: dict[int, list[str]] = {}
@@ -275,11 +279,6 @@ class TelegramBridgeBot:
                 text=str(exc),
             )
             return
-        await self._safe_send_message(
-            context.bot,
-            chat_id=reaction_update.chat.id,
-            text=f"Sent {decision}.",
-        )
 
     async def _handle_command(
         self,
@@ -401,7 +400,8 @@ class TelegramBridgeBot:
         if resume_required and not adapter.capabilities.supports_resume:
             raise RuntimeError(f"{adapter.display_name} does not support session resume.")
         resume_last = (resume or self.settings.agent_resume_last) and adapter.capabilities.supports_resume
-        command = adapter.build_command(self.settings.default_agent_command)
+        configured_cmd = self.settings.default_agent_command if adapter.id == self._configured_adapter_id else None
+        command = adapter.build_command(configured_cmd)
         session = AgentSession(
             adapter=adapter,
             command=command,
@@ -875,8 +875,11 @@ class TelegramBridgeBot:
             image_paths=image_paths,
             file_paths=file_paths,
         )
-        user_text = prompt_text if preserve_leading_slash else self._agent_user_text(prompt_text)
+        user_text = prompt_text if preserve_leading_slash else self._agent_user_text(prompt_text, chat_id=chat_id)
         if chat_id is not None:
+            history = self._chat_history(chat_id)
+            if history is not None:
+                history.append(role="user", text=text)
             self._clear_terminal_progress(chat_id)
             self._interactive_output_chats.add(chat_id)
             self._screenshot_watch_since_by_chat[chat_id] = time.time()
@@ -891,7 +894,6 @@ class TelegramBridgeBot:
             return
         self._start_typing(context.bot, message.chat_id)
         await self._apply_approval_action(pending, decision)
-        await message.reply_text(f"Sent {decision}.")
 
     async def _apply_approval_action(self, action: PendingAction, decision: ApprovalDecision) -> None:
         agent = self.state.active_agent
@@ -925,7 +927,10 @@ class TelegramBridgeBot:
             except RuntimeError as exc:
                 await query.edit_message_text(str(exc))
                 return
-            await query.edit_message_text(f"Sent {decision}.")
+            try:
+                await query.message.delete()
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
             return
         if choice_id == "details":
             await self._safe_send_message(
@@ -1121,7 +1126,7 @@ class TelegramBridgeBot:
     async def _maybe_emit_fallback_approval(self, bot, chat_id: int, session: AgentSession) -> None:
         if self._chat_notifications_suppressed(chat_id):
             return
-        if session.backend == "structured" or session.adapter.capabilities.supports_approval_events:
+        if session.adapter.capabilities.supports_approval_events:
             return
         recent_output = session.recent_output(4000)
         if has_auto_approval_marker(recent_output):
@@ -1412,6 +1417,8 @@ class TelegramBridgeBot:
         )
         message_id = self._dashboard_message_ids.get(chat_id)
         if message_id is None:
+            if status.state == "starting":
+                return
             sent = await self._safe_send_message(bot, chat_id=chat_id, text=text)
             if sent is not None:
                 self._dashboard_message_ids[chat_id] = sent.message_id
@@ -1443,7 +1450,13 @@ class TelegramBridgeBot:
         *,
         complete_request: bool = False,
     ) -> None:
-        if self._chat_notifications_suppressed(chat_id) or not text.strip():
+        if not text.strip():
+            return
+        if complete_request:
+            history = self._chat_history(chat_id)
+            if history is not None:
+                history.append(role="agent", text=text.strip())
+        if self._chat_notifications_suppressed(chat_id):
             return
         if looks_like_screenshot_reference(text):
             sent, error = await self._send_screenshot_for_output(bot, chat_id, text)
@@ -1718,7 +1731,7 @@ class TelegramBridgeBot:
             )
         )
 
-    def _agent_user_text(self, text: str) -> str:
+    def _agent_user_text(self, text: str, *, chat_id: int | None = None) -> str:
         if (
             self._agent_context_sent
             or not self.settings.agent_initial_prompt_enabled
@@ -1726,7 +1739,39 @@ class TelegramBridgeBot:
         ):
             return text
         self._agent_context_sent = True
-        return f"{self._agent_initial_prompt()}\n\nUser request:\n{text}"
+        initial = self._agent_initial_prompt()
+        history_section = self._agent_history_section(chat_id)
+        if history_section:
+            return f"{initial}\n\n{history_section}\n\nUser request:\n{text}"
+        return f"{initial}\n\nUser request:\n{text}"
+
+    def _chat_history(self, chat_id: int) -> ChatHistory | None:
+        if not self.settings.chat_history_enabled:
+            return None
+        if chat_id not in self._chat_histories:
+            history_dir = self.settings.chat_history_dir or (default_data_dir() / "chats")
+            self._chat_histories[chat_id] = ChatHistory(history_dir / f"{chat_id}.jsonl")
+        return self._chat_histories[chat_id]
+
+    def _agent_history_section(self, chat_id: int | None) -> str:
+        if not self.settings.chat_history_enabled or chat_id is None:
+            return ""
+        history = self._chat_history(chat_id)
+        if history is None:
+            return ""
+        tail = history.tail(self.settings.chat_history_tail_lines)
+        lines = [
+            f"Chat history log: {history.path}",
+            "Read this file for the full conversation (persists after Telegram deletion).",
+        ]
+        if tail:
+            lines.append(f"Recent {len(tail)} entries:")
+            for entry in tail:
+                snippet = entry.get("text", "")
+                if len(snippet) > 300:
+                    snippet = snippet[:300] + "…"
+                lines.append(f"  [{entry.get('ts', '')}] {entry.get('role', '?')}: {snippet}")
+        return "\n".join(lines)
 
     def _prompt_text_with_images(self, text: str, *, image_paths: tuple[Path, ...] = ()) -> str:
         cleaned = text.strip()
