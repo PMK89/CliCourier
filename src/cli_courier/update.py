@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import shutil
 from dataclasses import dataclass, field
@@ -44,6 +45,8 @@ def run_update() -> UpdateResult:
     except RuntimeError as exc:
         return UpdateResult(success=False, before_hash="?", after_hash="?", changed=False, error=str(exc))
 
+    _git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
     def git(*args: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args],
@@ -51,6 +54,9 @@ def run_update() -> UpdateResult:
             capture_output=True,
             text=True,
             check=False,
+            stdin=subprocess.DEVNULL,
+            env=_git_env,
+            timeout=60,
         )
 
     before_result = git("rev-parse", "--short", "HEAD")
@@ -58,7 +64,17 @@ def run_update() -> UpdateResult:
 
     lines: list[str] = []
 
-    fetch = git("fetch", "origin", "main")
+    try:
+        fetch = git("fetch", "origin", "main")
+    except subprocess.TimeoutExpired:
+        return UpdateResult(
+            success=False,
+            before_hash=before_hash,
+            after_hash=before_hash,
+            changed=False,
+            lines=lines,
+            error="git fetch timed out after 60s",
+        )
     if fetch.returncode != 0:
         msg = (fetch.stderr or fetch.stdout).strip()
         return UpdateResult(
@@ -71,7 +87,17 @@ def run_update() -> UpdateResult:
         )
     lines.append("Fetched origin/main.")
 
-    merge = git("merge", "--ff-only", "origin/main")
+    try:
+        merge = git("merge", "--ff-only", "origin/main")
+    except subprocess.TimeoutExpired:
+        return UpdateResult(
+            success=False,
+            before_hash=before_hash,
+            after_hash=before_hash,
+            changed=False,
+            lines=lines,
+            error="git merge timed out after 60s",
+        )
     if merge.returncode != 0:
         msg = (merge.stderr or merge.stdout).strip()
         return UpdateResult(
@@ -97,12 +123,24 @@ def run_update() -> UpdateResult:
             lines=lines,
             error="uv not found on PATH; run `uv tool install --force --editable .` manually",
         )
-    install = subprocess.run(
-        [uv, "tool", "install", "--force", "--editable", str(repo)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        install = subprocess.run(
+            [uv, "tool", "install", "--force", "--editable", str(repo)],
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return UpdateResult(
+            success=False,
+            before_hash=before_hash,
+            after_hash=after_hash,
+            changed=changed,
+            lines=lines,
+            error="uv install timed out after 300s",
+        )
     if install.returncode != 0:
         msg = (install.stderr or install.stdout).strip()
         return UpdateResult(

@@ -89,9 +89,10 @@ def start_daemon(
         import shlex
 
         env["DEFAULT_AGENT_COMMAND"] = shlex.join(agent_command)
-        env["DEFAULT_AGENT_ADAPTER"] = (
-            "codex" if Path(agent_command[0]).name == "codex" else "generic"
-        )
+        _COMMAND_TO_ADAPTER = {"codex": "codex", "claude": "claude", "gemini": "gemini"}
+        adapter_id = _COMMAND_TO_ADAPTER.get(Path(agent_command[0]).name.lower())
+        if adapter_id is not None:
+            env["DEFAULT_AGENT_ADAPTER"] = adapter_id
     if extra_env:
         env.update(extra_env)
 
@@ -137,4 +138,9 @@ def stop_daemon(
             pid_path.unlink(missing_ok=True)
             return daemon_status(pid_path=pid_path, log_path=log_path)
         time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    pid_path.unlink(missing_ok=True)
     return daemon_status(pid_path=pid_path, log_path=log_path)
