@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 import re
 import subprocess
@@ -299,6 +300,7 @@ class TelegramBridgeBot:
             "resume_agent": self._cmd_resume_agent,
             "agent": self._cmd_agent,
             "agents": self._cmd_agents,
+            "switch": self._cmd_switch,
             "pwd": self._cmd_pwd,
             "ls": self._cmd_ls,
             "tree": self._cmd_tree,
@@ -361,12 +363,13 @@ class TelegramBridgeBot:
             )
         pending = "yes" if self.state.active_pending_action("approval", chat_id=message.chat_id) else "no"
         muted = "yes" if self._notifications_muted() else "no"
-        await message.reply_text(
+        await self._reply_code(
+            message,
             f"{agent_status}\n"
             f"workspace: {self.sandbox.display_path(self.state.cwd)}\n"
             f"pending approval: {pending}\n"
             f"output mode: {self.settings.agent_output_mode.value}\n"
-            f"muted: {muted}"
+            f"muted: {muted}",
         )
 
     async def _cmd_start_agent(self, args: str, message, context) -> None:
@@ -474,19 +477,24 @@ class TelegramBridgeBot:
         await message.reply_text(reply)
 
     async def _cmd_restart_bridge(self, args: str, message, context) -> None:
-        command = _bridge_restart_command(no_resume=_no_resume_requested(args))
+        no_resume = _no_resume_requested(args)
+        active = self.state.active_agent
+        adapter_id = active.adapter.id if active is not None else self.settings.default_agent_adapter
+        adapter_name = active.adapter.display_name if active is not None else get_adapter(adapter_id).display_name
+        restart_env = {**os.environ, "DEFAULT_AGENT_ADAPTER": adapter_id}
+        command = _bridge_restart_command(no_resume=no_resume)
         try:
             subprocess.Popen(
                 command,
                 cwd=str(self.settings.workspace_root),
-                env=os.environ.copy(),
+                env=restart_env,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced to trusted operator
             await message.reply_text(f"Failed to schedule CliCourier restart: {exc}")
             return
-        suffix = "without resume" if _no_resume_requested(args) else "with Codex resume"
+        suffix = f"without resume" if no_resume else f"resuming {adapter_name}"
         session_name = self.settings.agent_tmux_session or "clicourier"
         await message.reply_text(
             f"Restarting CliCourier {suffix}. The bot will reconnect shortly.\n"
@@ -508,14 +516,51 @@ class TelegramBridgeBot:
         await self._send_to_agent(args, message, context, image_paths=image_paths, file_paths=file_paths)
 
     async def _cmd_agents(self, args: str, message, context) -> None:
-        lines = [
-            f"{adapter_id}: {adapter.display_name}"
-            for adapter_id, adapter in sorted(list_adapters().items())
-        ]
-        await message.reply_text("\n".join(lines))
+        active = self.state.active_agent
+        active_id = active.adapter.id if active is not None else self.settings.default_agent_adapter
+        lines = []
+        for adapter_id, adapter in sorted(list_adapters().items()):
+            marker = "* " if adapter_id == active_id else "  "
+            lines.append(f"{marker}{adapter_id}: {adapter.display_name}")
+        await self._reply_code(message, "\n".join(lines))
+
+    async def _cmd_switch(self, args: str, message, context) -> None:
+        target = args.strip().lower()
+        adapters = list_adapters()
+        active = self.state.active_agent
+        active_id = active.adapter.id if active is not None else self.settings.default_agent_adapter
+        if not target:
+            lines = []
+            for adapter_id, adapter in sorted(adapters.items()):
+                marker = "* " if adapter_id == active_id else "  "
+                lines.append(f"{marker}{adapter_id}: {adapter.display_name}")
+            await self._reply_code(message, "Available adapters (* = active):\n" + "\n".join(lines))
+            return
+        if target not in adapters:
+            names = ", ".join(sorted(adapters.keys()))
+            await message.reply_text(f"Unknown adapter '{target}'. Available: {names}")
+            return
+        if target == active_id:
+            await message.reply_text(f"Already using {adapters[target].display_name}.")
+            return
+        self.settings.default_agent_adapter = target
+        new_adapter = adapters[target]
+        if active is not None and active.is_running:
+            await active.stop()
+            self.state.active_agent = None
+        try:
+            reply = await self._start_agent_session(
+                chat_id=message.chat_id,
+                application=context.application,
+                resume=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced to operator
+            await message.reply_text(f"Switched to {new_adapter.display_name} but failed to start: {exc}")
+            return
+        await message.reply_text(f"Switched to {new_adapter.display_name}. {reply}")
 
     async def _cmd_pwd(self, args: str, message, context) -> None:
-        await message.reply_text(self.sandbox.display_path(self.state.cwd))
+        await self._reply_code(message, self.sandbox.display_path(self.state.cwd))
 
     async def _cmd_ls(self, args: str, message, context) -> None:
         try:
@@ -524,7 +569,7 @@ class TelegramBridgeBot:
             await message.reply_text(str(exc))
             return
         body = "\n".join(entry.display_name for entry in entries) or "(empty)"
-        await self._reply_chunks(message, body)
+        await self._reply_code(message, body)
 
     async def _cmd_tree(self, args: str, message, context) -> None:
         try:
@@ -532,7 +577,7 @@ class TelegramBridgeBot:
         except SandboxViolation as exc:
             await message.reply_text(str(exc))
             return
-        await self._reply_chunks(message, body)
+        await self._reply_code(message, body)
 
     async def _cmd_cd(self, args: str, message, context) -> None:
         if not args:
@@ -546,7 +591,7 @@ class TelegramBridgeBot:
             await message.reply_text(str(exc))
             return
         self.state.set_cwd(path)
-        await message.reply_text(self.sandbox.display_path(path))
+        await self._reply_code(message, self.sandbox.display_path(path))
 
     async def _cmd_cat(self, args: str, message, context) -> None:
         if not args:
@@ -557,7 +602,7 @@ class TelegramBridgeBot:
         except SandboxViolation as exc:
             await message.reply_text(str(exc))
             return
-        await self._reply_chunks(message, body or "(empty)")
+        await self._reply_code(message, body or "(empty)")
 
     async def _cmd_sendfile(self, args: str, message, context) -> None:
         if not args:
@@ -600,7 +645,7 @@ class TelegramBridgeBot:
             except ValueError:
                 display = artifact.path
             lines.append(f"{display} ({artifact.size} bytes)")
-        await message.reply_text("\n".join(lines))
+        await self._reply_code(message, "\n".join(lines))
 
     async def _cmd_tail(self, args: str, message, context) -> None:
         agent = self.state.active_agent
@@ -612,7 +657,7 @@ class TelegramBridgeBot:
         except ValueError:
             await message.reply_text("Usage: /tail [chars]")
             return
-        await self._reply_chunks(message, agent.recent_output(max(1, limit)) or "(empty)")
+        await self._reply_code(message, agent.recent_output(max(1, limit)) or "(empty)")
 
     async def _cmd_sendlog(self, args: str, message, context) -> None:
         agent = self.state.active_agent
@@ -1067,6 +1112,11 @@ class TelegramBridgeBot:
             and event.text.strip()
         ):
             await self._send_agent_output(bot, chat_id, event.text)
+        if event.kind == AgentEventKind.TOOL_STARTED and event.text.strip():
+            prefix = event.tool_name or "tool"
+            await self._send_agent_output(bot, chat_id, f"[{prefix}] {event.text}\n")
+        if event.kind == AgentEventKind.TOOL_COMPLETED and event.text.strip():
+            await self._send_agent_output(bot, chat_id, _truncate_tool_result(event.text) + "\n")
 
     async def _maybe_emit_fallback_approval(self, bot, chat_id: int, session: AgentSession) -> None:
         if self._chat_notifications_suppressed(chat_id):
@@ -1412,6 +1462,7 @@ class TelegramBridgeBot:
             await self._update_terminal_progress(bot, chat_id, sanitize_terminal_text(text))
             return
         if await self._publish_complete_output(bot, chat_id, text):
+            self._clear_terminal_progress(chat_id)
             self._interactive_output_chats.discard(chat_id)
             return
         if complete_request:
@@ -1618,6 +1669,15 @@ class TelegramBridgeBot:
     async def _reply_chunks(self, message, text: str) -> None:
         for chunk in chunk_text(text, self.settings.max_telegram_chunk_chars):
             await message.reply_text(chunk)
+
+    async def _reply_code(self, message, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        char_limit = max(200, min(self.settings.max_telegram_chunk_chars, TELEGRAM_SAFE_LIMIT) - 13)
+        for chunk in chunk_text(text, char_limit):
+            escaped = html.escape(chunk, quote=False)
+            await message.reply_text(f"<pre>{escaped}</pre>", parse_mode="HTML")
 
     def _identity(self, update) -> TelegramIdentity:
         reaction_update = getattr(update, "message_reaction", None)
@@ -2353,3 +2413,16 @@ def build_transcriber(settings: Settings) -> Transcriber:
             timeout_seconds=settings.whisper_cpp_timeout_seconds,
         )
     return DisabledTranscriber()
+
+
+_TOOL_RESULT_MAX_LINES = 30
+
+
+def _truncate_tool_result(text: str) -> str:
+    lines = text.splitlines()
+    if len(lines) <= _TOOL_RESULT_MAX_LINES:
+        return text
+    kept = lines[:_TOOL_RESULT_MAX_LINES]
+    omitted = len(lines) - _TOOL_RESULT_MAX_LINES
+    kept.append(f"... ({omitted} more lines)")
+    return "\n".join(kept)

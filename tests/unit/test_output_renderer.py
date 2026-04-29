@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import html
 from types import SimpleNamespace
 
 from cli_courier.telegram_bot.output_renderer import (
+    TELEGRAM_CLI_PARSE_MODE,
     StreamingMessageRenderer,
     render_output_window,
 )
@@ -13,15 +15,19 @@ class FakeTelegramBot:
         self.messages: list[str] = []
         self.send_calls: list[tuple[int, int, str]] = []
         self.edit_calls: list[tuple[int, int, str]] = []
+        self.send_kwargs: list[dict[str, object]] = []
+        self.edit_kwargs: list[dict[str, object]] = []
 
     async def send_message(self, *, chat_id: int, text: str, **kwargs):
         message_id = len(self.messages) + 1
         self.messages.append(text)
         self.send_calls.append((message_id, chat_id, text))
+        self.send_kwargs.append(kwargs)
         return SimpleNamespace(message_id=message_id)
 
     async def edit_message_text(self, *, chat_id: int, message_id: int, text: str, **kwargs):
         self.edit_calls.append((message_id, chat_id, text))
+        self.edit_kwargs.append(kwargs)
         if 1 <= message_id <= len(self.messages):
             self.messages[message_id - 1] = text
 
@@ -31,7 +37,14 @@ def numbered_lines(start: int, stop: int) -> list[str]:
 
 
 def output_lines(text: str) -> list[str]:
-    return [line for line in text.splitlines() if line.startswith("LINE ")]
+    return [line for line in rendered_output_body(text).splitlines() if line.startswith("LINE ")]
+
+
+def rendered_output_body(text: str) -> str:
+    body = text.split("\n\n", 1)[1] if "\n\n" in text else text
+    if body.startswith("<pre>") and body.endswith("</pre>"):
+        body = body[len("<pre>") : -len("</pre>")]
+    return html.unescape(body)
 
 
 def test_render_fewer_than_sixty_lines() -> None:
@@ -61,6 +74,26 @@ def test_long_lines_fit_under_telegram_safe_limit() -> None:
     assert output_lines(text)[-1].startswith("LINE 060")
 
 
+def test_render_uses_preformatted_html_for_cli_output() -> None:
+    text = render_output_window(
+        [
+            "$ printf '<status>'",
+            "name       value",
+            "alpha      <ready> & waiting",
+        ],
+        running=True,
+    )
+
+    assert text.startswith("Running.\nShowing latest 60 lines\n\n<pre>")
+    assert text.endswith("</pre>")
+    assert "&lt;ready&gt; &amp; waiting" in text
+    assert rendered_output_body(text) == (
+        "$ printf '<status>'\n"
+        "name       value\n"
+        "alpha      <ready> & waiting"
+    )
+
+
 async def test_duplicate_renders_do_not_trigger_edit() -> None:
     bot = FakeTelegramBot()
     renderer = StreamingMessageRenderer(chat_id=100, min_edit_interval_seconds=0)
@@ -82,6 +115,7 @@ async def test_first_render_sends_message_once() -> None:
 
     assert len(bot.send_calls) == 1
     assert bot.send_calls[0][1] == 100
+    assert bot.send_kwargs[0]["parse_mode"] == TELEGRAM_CLI_PARSE_MODE
     assert renderer.message_id == 1
 
 
@@ -98,6 +132,7 @@ async def test_subsequent_renders_edit_same_message_id() -> None:
     assert len(bot.edit_calls) == 1
     assert bot.edit_calls[0][0] == 1
     assert bot.edit_calls[0][1] == 100
+    assert bot.edit_kwargs[0]["parse_mode"] == TELEGRAM_CLI_PARSE_MODE
     assert output_lines(bot.messages[0]) == numbered_lines(1, 2)
 
 

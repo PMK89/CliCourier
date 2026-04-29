@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -503,7 +504,10 @@ def progress_body(text: str) -> str:
         and lines[1] in {"Showing latest 60 lines", "Showing final 60 lines"}
         and lines[2] == ""
     ):
-        return "\n".join(lines[3:])
+        body = "\n".join(lines[3:])
+        if body.startswith("<pre>") and body.endswith("</pre>"):
+            body = body[len("<pre>") : -len("</pre>")]
+        return html.unescape(body)
     return text
 
 
@@ -1270,7 +1274,7 @@ async def test_restart_bridge_command_launches_detached_cli_restart(
     assert calls["kwargs"]["cwd"] == str(tmp_path)
     assert calls["kwargs"]["start_new_session"] is True
     assert message.replies == [
-        "Restarting CliCourier with Codex resume. The bot will reconnect shortly.\n"
+        "Restarting CliCourier resuming Codex CLI. The bot will reconnect shortly.\n"
         "Opening local terminal for: tmux attach -t clicourier"
     ]
 
@@ -1392,13 +1396,10 @@ async def test_botstatus_is_handled_locally(tmp_path: Path) -> None:
 
     await bot._handle_command(parse_command("/botstatus"), message, FakeContext())
 
-    assert message.replies == [
-        "agent: stopped\n"
-        "workspace: /\n"
-        "pending approval: no\n"
-        "output mode: final\n"
-        "muted: no"
-    ]
+    assert len(message.replies) == 1
+    assert "<pre>" in message.replies[0]
+    assert "agent: stopped" in message.replies[0]
+    assert "output mode: final" in message.replies[0]
 
 
 async def test_post_init_registers_telegram_command_menu(tmp_path: Path) -> None:

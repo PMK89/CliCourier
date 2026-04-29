@@ -9,7 +9,7 @@ from cli_courier.agent.adapters import AgentAdapter
 from cli_courier.agent.chunking import OutputRingBuffer
 from cli_courier.agent.events import DEBUG_EVENT_KINDS, AgentEvent, AgentEventKind
 from cli_courier.agent.pty import PtyAgentProcess, build_agent_env
-from cli_courier.agent.structured import StructuredCodexProcess
+from cli_courier.agent.structured import StructuredAgentProcess
 from cli_courier.agent.tmux import TmuxAgentProcess
 
 
@@ -62,7 +62,7 @@ class AgentSession:
                 history_lines=tmux_history_lines,
             )
         elif backend == "structured":
-            self._process = StructuredCodexProcess(
+            self._process = StructuredAgentProcess(
                 command,
                 adapter=adapter,
                 cwd=cwd,

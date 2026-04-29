@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from cli_courier.agent.adapters import CodexAdapter, GenericCliAdapter
+from cli_courier.agent.adapters import ClaudeAdapter, CodexAdapter, GenericCliAdapter
 from cli_courier.agent.approval import detect_pending_approval, interpret_approval_text
 from cli_courier.agent.chunking import OutputRingBuffer, chunk_text
+from cli_courier.agent.claude_jsonl import parse_claude_jsonl_line
 from cli_courier.agent.codex_jsonl import parse_codex_jsonl_line, parse_codex_jsonl_lines
 from cli_courier.agent.events import AgentEvent, AgentEventKind
 from cli_courier.agent.output_filter import agent_output_in_progress, prepare_agent_output
@@ -550,3 +551,273 @@ def test_codex_jsonl_filters_prompt_placeholder_choice_labels() -> None:
     assert event is not None
     assert event.kind == AgentEventKind.CHOICE_REQUEST
     assert event.data["choices"] == [{"id": "2", "label": "gpt-5", "value": "gpt-5"}]
+
+
+# Claude Code adapter tests
+
+
+def test_claude_adapter_defaults_to_structured_backend() -> None:
+    assert resolve_agent_backend(ClaudeAdapter(), "auto") == "structured"
+
+
+def test_claude_adapter_builds_structured_turn_command(tmp_path) -> None:
+    command = ClaudeAdapter().build_structured_turn_command(
+        ["claude"],
+        prompt="hello",
+        cwd=str(tmp_path),
+        resume=False,
+    )
+
+    assert command == ["claude", "--print", "--output-format", "stream-json", "--verbose", "hello"]
+
+
+def test_claude_adapter_builds_structured_command_with_model_flag(tmp_path) -> None:
+    command = ClaudeAdapter().build_structured_turn_command(
+        ["claude", "--model", "opus"],
+        prompt="hello",
+        cwd=str(tmp_path),
+        resume=False,
+    )
+
+    assert command == [
+        "claude",
+        "--model",
+        "opus",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "hello",
+    ]
+
+
+def test_claude_adapter_builds_structured_resume_command(tmp_path) -> None:
+    command = ClaudeAdapter().build_structured_turn_command(
+        ["claude"],
+        prompt="follow up",
+        cwd=str(tmp_path),
+        resume=True,
+    )
+
+    assert "--continue" in command
+    assert command[-1] == "follow up"
+
+
+def test_claude_adapter_does_not_duplicate_flags(tmp_path) -> None:
+    command = ClaudeAdapter().build_structured_turn_command(
+        ["claude", "--print", "--output-format", "stream-json", "--verbose"],
+        prompt="hello",
+        cwd=str(tmp_path),
+        resume=False,
+    )
+
+    assert command.count("--print") == 1
+    assert command.count("--verbose") == 1
+    assert command.count("--output-format") == 1
+
+
+def test_claude_adapter_builds_interactive_resume_command() -> None:
+    command = ClaudeAdapter().build_resume_command(["claude", "--model", "sonnet"])
+
+    assert "--continue" in command
+    assert "claude" in command
+
+
+def test_claude_adapter_does_not_duplicate_continue_flag() -> None:
+    command = ClaudeAdapter().build_resume_command(["claude", "--continue"])
+
+    assert command.count("--continue") == 1
+
+
+# Claude Code JSONL parser tests
+
+
+def test_claude_jsonl_maps_system_init_to_session_started() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"system","subtype":"init","session_id":"sess-1","model":"claude-sonnet-4-6",'
+        '"cwd":"/tmp","permissionMode":"bypassPermissions"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.SESSION_STARTED
+    assert event.session_id == "sess-1"
+    assert "claude-sonnet-4-6" in event.text
+
+
+def test_claude_jsonl_maps_system_status_to_debug_status() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"system","subtype":"status","status":"requesting","session_id":"sess-1"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.STATUS
+    assert event.is_debug is True
+
+
+def test_claude_jsonl_maps_assistant_text_to_delta() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"Hello!"}],'
+        '"stop_reason":null},"session_id":"sess-1"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.ASSISTANT_DELTA
+    assert event.text == "Hello!"
+    assert event.session_id == "sess-1"
+
+
+def test_claude_jsonl_maps_assistant_tool_use_to_tool_started() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01",'
+        '"name":"Bash","input":{"command":"ls -la","description":"List files"}}],'
+        '"stop_reason":null},"session_id":"sess-1"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.TOOL_STARTED
+    assert event.tool_name == "Bash"
+    assert event.tool_call_id == "toolu_01"
+    assert "ls -la" in event.text
+
+
+def test_claude_jsonl_maps_assistant_thinking_to_reasoning() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"I should run ls.",'
+        '"signature":"sig"}],"stop_reason":null},"session_id":"sess-1"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.REASONING
+    assert event.is_debug is True
+    assert "I should run ls." in event.text
+
+
+def test_claude_jsonl_prefers_tool_use_over_text_in_same_message() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"assistant","message":{"content":['
+        '{"type":"tool_use","id":"toolu_01","name":"Edit","input":{"path":"/f","content":"x"}},'
+        '{"type":"text","text":"Done."}'
+        '],"stop_reason":null},"session_id":"sess-1"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.TOOL_STARTED
+    assert event.tool_name == "Edit"
+
+
+def test_claude_jsonl_maps_user_tool_result_to_tool_completed() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01",'
+        '"type":"tool_result","content":"hello_world","is_error":false}]},"session_id":"sess-1"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.TOOL_COMPLETED
+    assert event.text == "hello_world"
+    assert event.tool_call_id == "toolu_01"
+
+
+def test_claude_jsonl_maps_user_tool_result_error_to_tool_failed() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01",'
+        '"type":"tool_result","content":"Permission denied","is_error":true}]},"session_id":"sess-1"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.TOOL_FAILED
+    assert event.text == "Permission denied"
+
+
+def test_claude_jsonl_maps_tool_result_content_list() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01",'
+        '"type":"tool_result","content":[{"type":"text","text":"file1\\nfile2"}],"is_error":false}]}}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.TOOL_COMPLETED
+    assert "file1" in event.text
+
+
+def test_claude_jsonl_maps_result_success_to_final_message() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"result","subtype":"success","is_error":false,"result":"Done!",'
+        '"session_id":"sess-1","stop_reason":"end_turn"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.FINAL_MESSAGE
+    assert event.text == "Done!"
+    assert event.session_id == "sess-1"
+
+
+def test_claude_jsonl_maps_result_error_to_error_event() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"result","subtype":"error_max_turns","is_error":true,'
+        '"result":"Max turns reached","session_id":"sess-1"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.ERROR
+    assert "Max turns reached" in event.text
+
+
+def test_claude_jsonl_maps_rate_limit_event_to_debug_status() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"},"session_id":"sess-1"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.STATUS
+    assert event.is_debug is True
+
+
+def test_claude_jsonl_maps_stream_event_to_debug_status() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"stream_event","event":{"type":"message_start"},"session_id":"sess-1"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.STATUS
+    assert event.is_debug is True
+
+
+def test_claude_jsonl_propagates_session_id_from_top_level() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],'
+        '"stop_reason":null},"session_id":"uuid-123"}'
+    )
+
+    assert event is not None
+    assert event.session_id == "uuid-123"
+
+
+def test_claude_jsonl_session_id_parameter_takes_precedence() -> None:
+    event = parse_claude_jsonl_line(
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],'
+        '"stop_reason":null},"session_id":"from-payload"}',
+        session_id="from-param",
+    )
+
+    assert event is not None
+    assert event.session_id == "from-param"
+
+
+def test_claude_adapter_delegates_parse_jsonl_line() -> None:
+    adapter = ClaudeAdapter()
+    event = adapter.parse_jsonl_line(
+        '{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"s1"}'
+    )
+
+    assert event is not None
+    assert event.kind == AgentEventKind.FINAL_MESSAGE
+    assert event.text == "OK"
+
+
+def test_codex_adapter_delegates_parse_jsonl_line() -> None:
+    adapter = CodexAdapter()
+    event = adapter.parse_jsonl_line('{"type":"agent_message","message":"Done."}')
+
+    assert event is not None
+    assert event.kind == AgentEventKind.FINAL_MESSAGE
+    assert event.text == "Done."

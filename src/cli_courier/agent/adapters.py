@@ -3,9 +3,12 @@ from __future__ import annotations
 import re
 import shlex
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from cli_courier.security.terminal import sanitize_terminal_text
+
+if TYPE_CHECKING:
+    from cli_courier.agent.events import AgentEvent
 
 
 class AgentAdapter(Protocol):
@@ -35,6 +38,8 @@ class AgentAdapter(Protocol):
         resume: bool,
         output_last_message_path: str | None = None,
     ) -> list[str]: ...
+
+    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "AgentEvent | None": ...
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,9 @@ class BaseAdapter:
         resume: bool,
         output_last_message_path: str | None = None,
     ) -> list[str]:
+        raise NotImplementedError(f"{self.id} does not support structured stream mode")
+
+    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "AgentEvent | None":
         raise NotImplementedError(f"{self.id} does not support structured stream mode")
 
 
@@ -158,6 +166,11 @@ class CodexAdapter(BaseAdapter):
             return base if "--last" in base else [base[0], "resume", "--last", *base[2:]]
         return [base[0], "resume", "--last", *base[1:]]
 
+    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "AgentEvent | None":
+        from cli_courier.agent.codex_jsonl import parse_codex_jsonl_line
+
+        return parse_codex_jsonl_line(line, session_id=session_id)
+
 
 class GenericCliAdapter(BaseAdapter):
     def __init__(self) -> None:
@@ -179,10 +192,52 @@ class ClaudeAdapter(BaseAdapter):
             display_name="Claude Code",
             default_command=("claude",),
             approval_patterns=GENERIC_APPROVAL_PATTERNS,
-            capabilities=AdapterCapabilities(requires_pty=True),
+            capabilities=AdapterCapabilities(
+                supports_structured_stream=True,
+                supports_resume=True,
+                supports_partial_final=True,
+                supports_approval_events=False,
+                supports_file_events=False,
+                requires_pty=False,
+            ),
             approve_input="y",
             reject_input="n",
         )
+
+    def build_structured_turn_command(
+        self,
+        command: list[str],
+        *,
+        prompt: str,
+        cwd: str,
+        resume: bool,
+        output_last_message_path: str | None = None,
+    ) -> list[str]:
+        if not command:
+            raise ValueError("agent command must not be empty")
+        result = list(command)
+        if "--print" not in result and "-p" not in result:
+            result.append("--print")
+        if not _has_option_with_value(result, "--output-format"):
+            result.extend(["--output-format", "stream-json"])
+        # Required by Claude Code when using --print with stream-json
+        if "--verbose" not in result:
+            result.append("--verbose")
+        if resume and "--continue" not in result and "-c" not in result:
+            result.append("--continue")
+        result.append(prompt)
+        return result
+
+    def build_resume_command(self, command: list[str]) -> list[str]:
+        result = list(command)
+        if "--continue" not in result and "-c" not in result:
+            result.append("--continue")
+        return result
+
+    def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "AgentEvent | None":
+        from cli_courier.agent.claude_jsonl import parse_claude_jsonl_line
+
+        return parse_claude_jsonl_line(line, session_id=session_id)
 
 
 class GeminiAdapter(BaseAdapter):

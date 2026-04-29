@@ -5,13 +5,12 @@ import tempfile
 from pathlib import Path
 
 from cli_courier.agent.adapters import AgentAdapter
-from cli_courier.agent.codex_jsonl import parse_codex_jsonl_line
 from cli_courier.agent.events import AgentEvent, AgentEventKind
 from cli_courier.agent.pty import build_agent_env
 
 
-class StructuredCodexProcess:
-    """Run Codex one turn at a time through `codex exec --json` JSONL output."""
+class StructuredAgentProcess:
+    """Run an agent one turn at a time via JSONL-structured output."""
 
     def __init__(
         self,
@@ -44,7 +43,7 @@ class StructuredCodexProcess:
         await self.output_queue.put(
             AgentEvent(
                 kind=AgentEventKind.SESSION_STARTED,
-                text="Codex structured stream ready.",
+                text=f"{self.adapter.display_name} structured stream ready.",
                 session_id=self.adapter.id,
                 data={"command": self.command, "cwd": str(self.cwd)},
             )
@@ -79,7 +78,7 @@ class StructuredCodexProcess:
         await process.stdin.drain()
 
     async def send_key(self, key: str) -> None:
-        raise RuntimeError("structured Codex mode does not expose terminal key menus")
+        raise RuntimeError("structured agent mode does not expose terminal key menus")
 
     async def _run_turn(self, prompt: str) -> None:
         async with self._turn_lock:
@@ -113,7 +112,7 @@ class StructuredCodexProcess:
                 assert self._process.stdout is not None
                 stderr_task = asyncio.create_task(self._read_stderr(self._process))
                 async for raw_line in self._process.stdout:
-                    event = parse_codex_jsonl_line(
+                    event = self.adapter.parse_jsonl_line(
                         raw_line.decode("utf-8", errors="replace"),
                         session_id=self.adapter.id,
                     )
@@ -150,7 +149,7 @@ class StructuredCodexProcess:
                     await self.output_queue.put(
                         AgentEvent(
                             kind=AgentEventKind.TURN_FAILED,
-                            text=f"Codex exited with status {returncode}.",
+                            text=f"{self.adapter.display_name} exited with status {returncode}.",
                             session_id=self.adapter.id,
                             data={"returncode": returncode},
                         )
@@ -159,7 +158,7 @@ class StructuredCodexProcess:
                 await self.output_queue.put(
                     AgentEvent(
                         kind=AgentEventKind.ERROR,
-                        text=f"Codex structured stream failed: {exc}",
+                        text=f"{self.adapter.display_name} structured stream failed: {exc}",
                         session_id=self.adapter.id,
                     )
                 )
@@ -182,8 +181,11 @@ class StructuredCodexProcess:
                 )
 
 
+StructuredCodexProcess = StructuredAgentProcess
+
+
 def _temporary_output_path() -> Path:
-    handle = tempfile.NamedTemporaryFile(prefix="clicourier-codex-final-", delete=False)
+    handle = tempfile.NamedTemporaryFile(prefix="clicourier-agent-final-", delete=False)
     handle.close()
     return Path(handle.name)
 

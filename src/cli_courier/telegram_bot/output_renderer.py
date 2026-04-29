@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -8,6 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 TELEGRAM_HARD_LIMIT = 4096
 TELEGRAM_SAFE_LIMIT = 3900
 DEFAULT_MAX_LINES = 60
+TELEGRAM_CLI_PARSE_MODE = "HTML"
 
 FieldLogCallback = Callable[..., None]
 SleepCallback = Callable[[float], Awaitable[None]]
@@ -150,7 +152,11 @@ class TelegramEditableOutputMessage:
                 attempt=attempt,
             )
             try:
-                sent = await bot.send_message(chat_id=self.chat_id, text=text)
+                sent = await bot.send_message(
+                    chat_id=self.chat_id,
+                    text=text,
+                    parse_mode=TELEGRAM_CLI_PARSE_MODE,
+                )
                 message_id = getattr(sent, "message_id", None)
                 if message_id is None:
                     raise RuntimeError("Telegram send_message returned no message_id")
@@ -198,7 +204,12 @@ class TelegramEditableOutputMessage:
                 attempt=attempt,
             )
             try:
-                await edit_message_text(chat_id=self.chat_id, message_id=self.message_id, text=text)
+                await edit_message_text(
+                    chat_id=self.chat_id,
+                    message_id=self.message_id,
+                    text=text,
+                    parse_mode=TELEGRAM_CLI_PARSE_MODE,
+                )
                 self.last_text = text
                 self.last_render_at = time.monotonic()
                 self._log(
@@ -349,15 +360,24 @@ def _compose(header: str, lines: Sequence[str]) -> str:
     body = "\n".join(lines).strip("\n")
     if not body:
         return header
-    return f"{header}\n\n{body}"
+    return f"{header}\n\n<pre>{html.escape(body, quote=False)}</pre>"
 
 
 def _trim_single_line_to_fit(header: str, line: str, limit: int) -> str:
-    prefix_len = len(f"{header}\n\n")
-    available = max(0, limit - prefix_len)
-    if available <= 0:
+    if len(_compose(header, [""])) > limit:
         return ""
-    return line[-available:]
+    low = 0
+    high = len(line)
+    best = ""
+    while low <= high:
+        size = (low + high) // 2
+        candidate = line[-size:] if size else ""
+        if len(_compose(header, [candidate])) <= limit:
+            best = candidate
+            low = size + 1
+        else:
+            high = size - 1
+    return best
 
 
 def _format_error(exc: Exception | None) -> str:
