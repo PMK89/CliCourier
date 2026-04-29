@@ -38,6 +38,7 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["slow: marks tests as slow-running (deselect with '-m not slow')"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cli_courier", "src/clicourier"]

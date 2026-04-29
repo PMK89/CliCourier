@@ -16,6 +16,7 @@ from cli_courier.doctor import run_doctor
 from cli_courier.local_config import default_config_path, default_log_path, default_mute_file
 from cli_courier.model_manager import download_model, format_model_list
 from cli_courier.setup import init_config, run_setup, setup_whisper_cpp
+from cli_courier.update import run_update
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -164,6 +165,20 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(log_path.read_text(encoding="utf-8", errors="replace")[-args.chars :])
         return 0
+    if command == "update":
+        result = run_update()
+        for line in result.lines:
+            if line:
+                print(line)
+        if not result.success:
+            print(f"update failed: {result.error}", file=sys.stderr)
+            return 1
+        if result.changed:
+            print(f"updated {result.before_hash} -> {result.after_hash}")
+        else:
+            print(f"already up to date ({result.after_hash})")
+        print("Run `clicourier restart` to apply.")
+        return 0
 
     parser.print_help()
     return 2
@@ -239,6 +254,8 @@ def build_parser() -> argparse.ArgumentParser:
     logs_parser = subparsers.add_parser("logs", help="Print the daemon log tail")
     logs_parser.add_argument("--log", help="Override daemon log file")
     logs_parser.add_argument("--chars", type=int, default=8000)
+
+    subparsers.add_parser("update", help="Pull latest main branch and reinstall dependencies")
 
     return parser
 

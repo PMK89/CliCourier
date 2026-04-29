@@ -48,6 +48,7 @@ from cli_courier.telegram_bot.output_renderer import (
 from cli_courier.telegram_bot.router import RouteKind, route_text
 from cli_courier.chat_history import ChatHistory
 from cli_courier.local_config import default_data_dir
+from cli_courier.update import run_update
 from cli_courier.voice import (
     DisabledTranscriber,
     FasterWhisperTranscriber,
@@ -292,6 +293,7 @@ class TelegramBridgeBot:
         handlers = {
             "botstatus": self._cmd_status,
             "restart": self._cmd_restart_bridge,
+            "update": self._cmd_update,
             "start_agent": self._cmd_start_agent,
             "stop_agent": self._cmd_stop_agent,
             "restart_agent": self._cmd_restart_agent,
@@ -500,6 +502,11 @@ class TelegramBridgeBot:
             f"Restarting CliCourier {suffix}. The bot will reconnect shortly.\n"
             f"Opening local terminal for: tmux attach -t {session_name}"
         )
+
+    async def _cmd_update(self, args: str, message, context) -> None:
+        await message.reply_text("Updating CliCourier…")
+        result = await asyncio.to_thread(run_update)
+        await message.reply_text(result.summary())
 
     async def _cmd_agent(
         self,

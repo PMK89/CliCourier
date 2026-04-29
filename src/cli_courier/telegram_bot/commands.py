@@ -7,6 +7,7 @@ BOT_COMMAND_SPECS: tuple[tuple[str, str], ...] = (
     ("start", "show bridge command list"),
     ("botstatus", "show bridge and agent status"),
     ("restart", "restart CliCourier and resume the last agent session"),
+    ("update", "pull latest code and reinstall dependencies"),
     ("start_agent", "start the configured agent"),
     ("stop_agent", "stop the active agent"),
     ("restart_agent", "restart the active agent and resume by default"),

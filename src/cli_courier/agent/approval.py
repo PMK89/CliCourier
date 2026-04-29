@@ -137,7 +137,7 @@ def _looks_like_terminal_noise(line: str) -> bool:
         return True
     if "esc to interrupt" in line.lower():
         return True
-    if re.match(r"^(?:gpt-|claude|gemini)\S*\s+", line, re.IGNORECASE):
+    if re.match(r"^(?:gpt-|claude-|gemini-)\S*\s+", line, re.IGNORECASE):
         return True
     if re.match(r"^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s+", line):
         return True
