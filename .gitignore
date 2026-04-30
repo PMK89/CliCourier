@@ -1,0 +1,39 @@
+# Python bytecode and test caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and packaging artifacts
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+build/
+dist/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Local agent/editor state
+.claude/
+.codex/
+.clicourier/
+.playwright-cli/
+
+# Generated screenshots and browser artifacts
+output/playwright/
+playwright-report/
+test-results/
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
