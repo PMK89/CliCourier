@@ -132,12 +132,12 @@ class TmuxAgentProcess:
     def _send_text_with_submit(self, text: str, submit_sequence: str) -> None:
         normalized = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").splitlines())
         if normalized:
+            # Use send-keys -l so both text and Enter go through the same key event
+            # queue, guaranteeing Enter is processed after the text. paste-buffer -p
+            # (bracketed paste) uses a separate path that can cause Enter to be dropped
+            # by Ink/React TUIs (like Claude Code) that buffer input during paste sequences.
             subprocess.run(
-                ["tmux", "set-buffer", normalized],
-                check=True,
-            )
-            subprocess.run(
-                ["tmux", "paste-buffer", "-d", "-p", "-t", self.target],
+                ["tmux", "send-keys", "-t", self.target, "-l", normalized],
                 check=True,
             )
             if self.submit_delay_seconds > 0:

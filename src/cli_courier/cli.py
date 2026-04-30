@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from cli_courier.app import main as run_app
-from cli_courier.config import load_settings
+from cli_courier.config import load_settings, settings_summary_lines
 from cli_courier.daemon import daemon_status, start_daemon, stop_daemon
 from cli_courier.doctor import run_doctor
 from cli_courier.local_config import default_config_path, default_log_path, default_mute_file
@@ -370,7 +370,10 @@ def run_with_mode_prompt(
 
     if selected == "detached":
         session_name = extra_env["AGENT_TMUX_SESSION"]
-        print(f"detached agent terminal: tmux attach -t {session_name}")
+        if wait_for_tmux_session(session_name):
+            print(f"detached agent terminal: tmux attach -t {session_name}")
+        else:
+            print(f"bridge started; attach once the agent is ready: tmux attach -t {session_name}")
         return 0
 
     if should_attach_terminal and selected in {"desktop", "local", "telegram"}:
@@ -648,23 +651,14 @@ def tmux_session_has_live_pane(session_name: str) -> bool:
 
 def print_config(config_path: Path | None) -> int:
     path = config_path or default_config_path()
-    print(f"path: {path}")
-    print(f"exists: {'yes' if path.exists() else 'no'}")
     try:
         settings = load_settings(config_path)
     except Exception as exc:  # noqa: BLE001 - config command should explain bad config
+        print(f"path: {path}")
+        print(f"exists: {'yes' if path.exists() else 'no'}")
         print(f"valid: no ({exc})")
         return 1
-    print("valid: yes")
-    print("telegram_token: present" if settings.telegram_bot_token.get_secret_value() else "telegram_token: missing")
-    print("allowed_users: " + ",".join(str(user_id) for user_id in settings.allowed_telegram_user_ids))
-    print(f"workspace_root: {settings.workspace_root}")
-    print(f"default_agent_command: {settings.default_agent_command}")
-    print(f"agent_terminal_backend: {settings.agent_terminal_backend.value}")
-    print(f"agent_resume_last: {settings.agent_resume_last}")
-    print(f"agent_tmux_session: {settings.agent_tmux_session or 'clicourier'}")
-    print(f"whisper_backend: {settings.whisper_backend.value}")
-    print(f"whisper_model: {settings.whisper_model}")
+    print("\n".join(settings_summary_lines(settings, config_path=path)))
     return 0
 
 
