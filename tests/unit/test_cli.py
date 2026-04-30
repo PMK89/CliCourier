@@ -9,7 +9,7 @@ import cli_courier.cli as cli_courier_cli
 import clicourier.cli
 from cli_courier.cli import normalize_remainder
 from cli_courier.cli import normalize_run_mode, run_with_mode_prompt, set_mute_file
-from cli_courier.cli import terminal_attach_command
+from cli_courier.cli import desktop_terminal_env, launch_tmux_terminal, terminal_attach_command
 from cli_courier.doctor import collect_checks
 from cli_courier.local_config import default_state_dir
 from cli_courier.setup import (
@@ -300,13 +300,16 @@ def test_restart_open_terminal_launches_desktop_terminal(tmp_path: Path, monkeyp
     )
     monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
     monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
-    monkeypatch.setattr("cli_courier.cli.terminal_attach_command", lambda _session: ["terminal"])
+    monkeypatch.setattr("cli_courier.cli.terminal_attach_commands", lambda _session: [["terminal"]])
     monkeypatch.setenv("DISPLAY", ":0")
 
     class FakePopen:
         def __init__(self, command, **kwargs) -> None:
             calls["command"] = command
             calls["kwargs"] = kwargs
+
+        def poll(self):
+            return None
 
     monkeypatch.setattr("cli_courier.cli.subprocess.Popen", FakePopen)
 
@@ -335,7 +338,7 @@ def test_restart_open_terminal_infers_desktop_env(tmp_path: Path, monkeypatch) -
     )
     monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
     monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
-    monkeypatch.setattr("cli_courier.cli.terminal_attach_command", lambda _session: ["terminal"])
+    monkeypatch.setattr("cli_courier.cli.terminal_attach_commands", lambda _session: [["terminal"]])
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.setattr("cli_courier.cli.desktop_terminal_env", lambda: {"DISPLAY": ":0"})
@@ -344,6 +347,9 @@ def test_restart_open_terminal_infers_desktop_env(tmp_path: Path, monkeypatch) -
         def __init__(self, command, **kwargs) -> None:
             calls["command"] = command
             calls["kwargs"] = kwargs
+
+        def poll(self):
+            return None
 
     monkeypatch.setattr("cli_courier.cli.subprocess.Popen", FakePopen)
 
@@ -367,6 +373,60 @@ def test_terminal_attach_command_uses_gnome_terminal(monkeypatch) -> None:
         "attach",
         "-t",
         "clicourier",
+    ]
+
+
+def test_desktop_terminal_env_uses_desktop_session_auth(monkeypatch) -> None:
+    for key in (
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_CURRENT_DESKTOP",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(
+        "cli_courier.cli._desktop_process_env",
+        lambda: {
+            "DISPLAY": ":0",
+            "XAUTHORITY": "/home/test/.Xauthority",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+            "XDG_CURRENT_DESKTOP": "ubuntu:GNOME",
+        },
+    )
+
+    env = desktop_terminal_env()
+
+    assert env["DISPLAY"] == ":0"
+    assert env["XAUTHORITY"] == "/home/test/.Xauthority"
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == "unix:path=/run/user/1000/bus"
+
+
+def test_launch_tmux_terminal_falls_back_after_failed_terminal(monkeypatch) -> None:
+    calls = []
+
+    monkeypatch.setattr("cli_courier.cli.desktop_terminal_env", lambda: {"DISPLAY": ":0"})
+    monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
+    monkeypatch.setattr(
+        "cli_courier.cli.terminal_attach_commands",
+        lambda _session: [["bad-terminal"], ["xterm", "-e", "tmux", "attach", "-t", "clicourier"]],
+    )
+    monkeypatch.setattr("cli_courier.cli.time.sleep", lambda _seconds: None)
+
+    class FakePopen:
+        def __init__(self, command, **kwargs) -> None:
+            calls.append(command)
+            self._returncode = 1 if command == ["bad-terminal"] else None
+
+        def poll(self):
+            return self._returncode
+
+    monkeypatch.setattr("cli_courier.cli.subprocess.Popen", FakePopen)
+
+    assert launch_tmux_terminal("clicourier") is True
+    assert calls == [
+        ["bad-terminal"],
+        ["xterm", "-e", "tmux", "attach", "-t", "clicourier"],
     ]
 
 

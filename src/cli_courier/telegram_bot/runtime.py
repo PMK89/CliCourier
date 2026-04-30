@@ -939,7 +939,6 @@ class TelegramBridgeBot:
         text = agent.adapter.approve_input if decision == "approve" else agent.adapter.reject_input
         await agent.send_approval(text)
         self.state.clear_pending_action(action.id)
-        self._last_approval_signature = None
         await agent.output_queue.put(
             AgentEvent(
                 kind=AgentEventKind.APPROVAL_RESOLVED,
@@ -1172,6 +1171,8 @@ class TelegramBridgeBot:
         if self._chat_notifications_suppressed(chat_id):
             return
         if session.adapter.capabilities.supports_approval_events:
+            return
+        if session.backend == "structured":
             return
         recent_output = session.recent_output(4000)
         if has_auto_approval_marker(recent_output):
