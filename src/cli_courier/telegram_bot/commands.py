@@ -33,6 +33,7 @@ BOT_COMMAND_SPECS: tuple[tuple[str, str], ...] = (
     ("trace_off", "suppress reasoning/tool/status lines"),
     ("approve", "approve the pending agent prompt"),
     ("reject", "reject the pending agent prompt"),
+    ("recheck", "re-scan agent output for a stuck approval"),
     ("voice_approve", "send the pending transcript"),
     ("voice_reject", "discard the pending transcript"),
     ("mute", "suppress proactive agent output"),

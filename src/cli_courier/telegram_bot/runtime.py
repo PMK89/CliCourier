@@ -327,6 +327,7 @@ class TelegramBridgeBot:
             "desktop": self._cmd_mute,
             "telegram": self._cmd_unmute,
             "mute_status": self._cmd_mute_status,
+            "recheck": self._cmd_recheck,
             "bothelp": self._cmd_help,
             "start": self._cmd_help,
         }
@@ -759,6 +760,33 @@ class TelegramBridgeBot:
     async def _cmd_help(self, args: str, message, context) -> None:
         await message.reply_text(COMMAND_HELP)
 
+    async def _cmd_recheck(self, args: str, message, context) -> None:
+        session = self.state.active_agent
+        if session is None or not session.is_running:
+            await message.reply_text("Agent is not running.")
+            return
+        if session.adapter.capabilities.supports_approval_events:
+            await message.reply_text("Adapter uses native approval events; recheck is only for fallback detection.")
+            return
+        self.state.clear_pending_actions(kind="approval", chat_id=message.chat_id)
+        self._last_approval_signature = None
+        recent = session.recent_output(4000)
+        from cli_courier.agent.approval import detect_pending_approval
+        pending = detect_pending_approval(recent, session.adapter)
+        if pending is None:
+            await message.reply_text("Recheck complete. No pending approval detected in recent output.")
+            return
+        await self._send_approval_event(
+            context.bot,
+            message.chat_id,
+            session,
+            AgentEvent(
+                kind=AgentEventKind.APPROVAL_REQUESTED,
+                text=pending.prompt_excerpt,
+                session_id=session.adapter.id,
+            ),
+        )
+
     async def _handle_voice(self, message, context, *, stop_typing: bool = False) -> None:
         attachment = self._audio_attachment(message)
         if attachment is None:
@@ -892,6 +920,8 @@ class TelegramBridgeBot:
             self._screenshot_watch_since_by_chat[chat_id] = time.time()
             self._remember_agent_input_echo(chat_id, prompt_text)
             self._remember_agent_input_echo(chat_id, user_text)
+        self._last_approval_signature = None
+        self._last_choice_signature = None
         await agent.send_text(user_text)
 
     async def _handle_approval(self, decision: ApprovalDecision, message, context) -> None:
@@ -909,6 +939,7 @@ class TelegramBridgeBot:
         text = agent.adapter.approve_input if decision == "approve" else agent.adapter.reject_input
         await agent.send_approval(text)
         self.state.clear_pending_action(action.id)
+        self._last_approval_signature = None
         await agent.output_queue.put(
             AgentEvent(
                 kind=AgentEventKind.APPROVAL_RESOLVED,
@@ -1022,6 +1053,7 @@ class TelegramBridgeBot:
                         final_text = self._select_complete_output(buffered_text, final_text)
                     self._record_session_event(session, event)
                     await self._maybe_update_dashboard(bot, chat_id, session, force=True)
+                    was_interactive = chat_id in self._interactive_output_chats
                     await self._send_agent_output(
                         bot,
                         chat_id,
@@ -1030,6 +1062,8 @@ class TelegramBridgeBot:
                     )
                     self._stop_typing(chat_id)
                     pending_text = ""
+                    if was_interactive:
+                        await self._send_turn_done_notification(bot, chat_id)
                     continue
                 await self._handle_agent_event(bot, chat_id, session, event)
                 if (
@@ -1042,6 +1076,7 @@ class TelegramBridgeBot:
                         suppress_trace_lines=self.settings.suppress_agent_trace_lines,
                     )
                     final_text = self._suppress_agent_input_echoes(chat_id, final_text)
+                    was_interactive = chat_id in self._interactive_output_chats
                     await self._send_agent_output(
                         bot,
                         chat_id,
@@ -1050,6 +1085,8 @@ class TelegramBridgeBot:
                     )
                     self._stop_typing(chat_id)
                     pending_text = ""
+                    if was_interactive:
+                        await self._send_turn_done_notification(bot, chat_id)
                 if event.kind in {AgentEventKind.TURN_COMPLETED, AgentEventKind.TURN_FAILED, AgentEventKind.ERROR}:
                     if not self._approval_pending(chat_id):
                         self._interactive_output_chats.discard(chat_id)
@@ -1071,6 +1108,7 @@ class TelegramBridgeBot:
                 await self._maybe_emit_fallback_approval(bot, chat_id, session)
             except asyncio.TimeoutError:
                 await self._render_terminal_progress(bot, chat_id)
+                await self._maybe_emit_fallback_approval(bot, chat_id, session)
             await self._send_new_screenshots(bot, chat_id)
             await self._maybe_update_dashboard(bot, chat_id, session)
         if pending_text:
@@ -1142,12 +1180,30 @@ class TelegramBridgeBot:
             return
         current = self.state.active_pending_action("approval", chat_id=chat_id)
         if current is not None:
-            return
+            if current.message_id is not None:
+                return
+            # Pending action exists but Telegram message never sent — clear and retry.
+            print(
+                f"clicourier approval_retry chat_id={chat_id} action_id={current.id}",
+                flush=True,
+            )
+            self.state.clear_pending_action(current.id)
+            self._last_approval_signature = None
         pending = detect_pending_approval(recent_output, session.adapter)
         if pending is None:
+            print(
+                f"clicourier approval_scan chat_id={chat_id} detected=false"
+                f" tail_len={len(recent_output)} sig={self._last_approval_signature!r:.60}",
+                flush=True,
+            )
             return
         if pending.prompt_excerpt == self._last_approval_signature:
             return
+        print(
+            f"clicourier approval_scan chat_id={chat_id} detected=true"
+            f" excerpt={pending.prompt_excerpt!r:.80}",
+            flush=True,
+        )
         self._last_approval_signature = pending.prompt_excerpt
         await self._send_approval_event(
             bot,
@@ -1201,6 +1257,13 @@ class TelegramBridgeBot:
         self._stop_typing(chat_id)
         if sent is not None:
             action.message_id = sent.message_id
+
+    async def _send_turn_done_notification(self, bot, chat_id: int) -> None:
+        if self._notifications_muted():
+            return
+        if self._approval_pending(chat_id):
+            return
+        await self._safe_send_message(bot, chat_id=chat_id, text="Done.")
 
     async def _send_choice_request_event(
         self,
