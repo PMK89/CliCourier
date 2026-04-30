@@ -36,6 +36,9 @@ CliCourier does not parse arbitrary agent output into Telegram choices. Buttons 
 only created from explicit bridge states such as approvals and voice transcript
 confirmation.
 
+Desktop/mute mode suppresses proactive background output, but a request you send from
+Telegram still gets its final output and a separate `Done.` completion notification.
+
 ## Approvals
 
 | Command | Description |

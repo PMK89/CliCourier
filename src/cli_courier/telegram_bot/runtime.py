@@ -1062,7 +1062,7 @@ class TelegramBridgeBot:
                     self._stop_typing(chat_id)
                     pending_text = ""
                     if was_interactive:
-                        await self._send_turn_done_notification(bot, chat_id)
+                        await self._send_turn_done_notification(bot, chat_id, allow_muted=True)
                     continue
                 await self._handle_agent_event(bot, chat_id, session, event)
                 if (
@@ -1085,7 +1085,7 @@ class TelegramBridgeBot:
                     self._stop_typing(chat_id)
                     pending_text = ""
                     if was_interactive:
-                        await self._send_turn_done_notification(bot, chat_id)
+                        await self._send_turn_done_notification(bot, chat_id, allow_muted=True)
                 if event.kind in {AgentEventKind.TURN_COMPLETED, AgentEventKind.TURN_FAILED, AgentEventKind.ERROR}:
                     if not self._approval_pending(chat_id):
                         self._interactive_output_chats.discard(chat_id)
@@ -1259,8 +1259,14 @@ class TelegramBridgeBot:
         if sent is not None:
             action.message_id = sent.message_id
 
-    async def _send_turn_done_notification(self, bot, chat_id: int) -> None:
-        if self._notifications_muted():
+    async def _send_turn_done_notification(
+        self,
+        bot,
+        chat_id: int,
+        *,
+        allow_muted: bool = False,
+    ) -> None:
+        if self._notifications_muted() and not allow_muted:
             return
         if self._approval_pending(chat_id):
             return

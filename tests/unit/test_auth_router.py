@@ -658,6 +658,56 @@ async def test_muted_telegram_request_still_delivers_final_output(tmp_path: Path
     assert non_dashboard_messages(bot_api.messages) == ["Done."]
 
 
+async def test_muted_interactive_turn_still_sends_done_notification(tmp_path: Path) -> None:
+    app_settings = settings(
+        tmp_path,
+        NOTIFICATION_BLOCK_FILE=str(tmp_path / ".muted"),
+        OUTPUT_FLUSH_INTERVAL_MS="1",
+    )
+    app_settings.notification_block_file.write_text("muted\n", encoding="utf-8")
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot_api = FakeBot()
+    bridge._interactive_output_chats.add(100)
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        await session.output_queue.put(
+            AgentEvent(
+                kind=AgentEventKind.FINAL_MESSAGE,
+                text="Finished the requested work.",
+                session_id="generic",
+            )
+        )
+        for _ in range(100):
+            if non_dashboard_messages(bot_api.messages) == [
+                "Finished the requested work.",
+                "Done.",
+            ]:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    assert non_dashboard_messages(bot_api.messages) == [
+        "Finished the requested work.",
+        "Done.",
+    ]
+
+
 async def test_muted_telegram_request_still_delivers_approval_prompt(tmp_path: Path) -> None:
     app_settings = settings(tmp_path, NOTIFICATION_BLOCK_FILE=str(tmp_path / ".muted"))
     app_settings.notification_block_file.write_text("muted\n", encoding="utf-8")

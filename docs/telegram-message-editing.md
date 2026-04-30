@@ -44,6 +44,11 @@ reject the edit as "message is not modified".
 The final render bypasses throttling and edits the existing output message to the final
 latest 60 lines.
 
+For requests that originated from Telegram, CliCourier sends a separate `Done.` message
+after completion. That message exists to trigger a normal Telegram notification because
+edits to an existing progress message may not alert the user. It is still sent for that
+active request even when desktop mode has muted proactive background output.
+
 ## Unit Tests
 
 Run the renderer and Telegram runtime tests:

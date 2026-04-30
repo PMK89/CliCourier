@@ -1,3 +1,13 @@
+<p align="center">
+  <img src="CliCourierLogo.png" alt="CliCourier - vibe code everywhere" width="560">
+</p>
+
+<p align="center">
+  <a href="#installation"><img alt="Install with uv" src="https://img.shields.io/badge/install-uv%20tool-5F45E4?style=flat-square"></a>
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-2B6CF1?style=flat-square">
+  <img alt="Local-first Telegram bridge" src="https://img.shields.io/badge/local--first-Telegram-1789F9?style=flat-square">
+</p>
+
 # CliCourier
 
 CliCourier is a local-first Telegram bridge for controlling a trusted CLI agent from a
@@ -226,6 +236,11 @@ in Telegram as raw reasoning unless `/trace_on` is enabled. Use `/tail`, `/log`,
 [docs/telegram-message-editing.md](docs/telegram-message-editing.md) for the deterministic
 test agent and Telegram Web verification workflow.
 
+For Telegram-originated requests, CliCourier also sends a short `Done.` message after the
+turn completes. This message is intentionally separate from the edited progress message so
+Telegram can raise a normal completion notification, even when desktop mode has muted
+proactive background output.
+
 The daemon log records progress-message operations without message content, for example
 `clicourier agent_output action=progress_send_ok ...`,
 `action=progress_edit_ok`, and `action=progress_edit_failed`. Use `clicourier logs` to
@@ -291,5 +306,7 @@ and leave sensitive file sending disabled by default.
 - [ARCHITECTURE.md](ARCHITECTURE.md) explains the module boundaries and data flow.
 - [COMMANDS.md](COMMANDS.md) lists the Telegram command surface.
 - [SECURITY.md](SECURITY.md) documents the threat model and local hardening notes.
+- [docs/brand.md](docs/brand.md) documents the logo assets and extracted purple-blue palette.
+- [docs/telegram-message-editing.md](docs/telegram-message-editing.md) documents progress and completion notification behavior.
 - [docs/mini-app-console.md](docs/mini-app-console.md) sketches a future Telegram Mini App console.
 - [ROADMAP.md](ROADMAP.md) tracks planned work beyond the MVP.

@@ -112,6 +112,11 @@ limit.
 Rolling terminal output uses a separate editable progress message so visible output is
 distinct from the dashboard summary without flooding the chat.
 
+Interactive Telegram requests also get a separate `Done.` message after the turn finishes.
+This completion ping is deliberately not represented as an edit, so Telegram can raise a
+normal notification. The ping is allowed through for the chat that initiated the request
+even when the mute file is present.
+
 Approvals and voice transcripts are represented as `PendingAction` records. Button
 callbacks use `cc:<action-id>:<choice-id>`, stale callbacks are rejected, and `yes`/`no`
 text only routes to approval handling when a matching pending approval exists.
