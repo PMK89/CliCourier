@@ -28,6 +28,7 @@ def test_normalize_remainder_strips_double_dash() -> None:
 def test_normalize_run_mode_maps_local_to_desktop() -> None:
     assert normalize_run_mode("local") == "desktop"
     assert normalize_run_mode("telegram") == "telegram"
+    assert normalize_run_mode("vps") == "detached"
 
 
 def test_set_mute_file_toggles_file(tmp_path: Path) -> None:
@@ -107,6 +108,45 @@ def test_telegram_run_mode_without_agent_starts_bridge_only(tmp_path: Path, monk
     assert not FakeSettings.notification_block_file.exists()
 
 
+def test_detached_run_mode_starts_tmux_without_attach(tmp_path: Path, monkeypatch) -> None:
+    calls = {}
+
+    class FakeSettings:
+        notification_block_file = tmp_path / "muted"
+        agent_tmux_session = "clicourier-vps"
+        default_agent_command = "codex"
+
+    monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
+
+    def fake_start_daemon(**kwargs):
+        calls["start"] = kwargs
+        return DaemonStatus(True, 123, tmp_path / "pid", tmp_path / "log")
+
+    def fake_run(command, *, check=False):
+        calls["run"] = command
+
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    monkeypatch.setattr("cli_courier.cli.start_daemon", fake_start_daemon)
+    monkeypatch.setattr("cli_courier.cli.subprocess.run", fake_run)
+
+    result = run_with_mode_prompt(
+        config_path=None,
+        agent_command=[],
+        mode="detached",
+    )
+
+    assert result == 0
+    assert calls["start"]["auto_start_agent"] is True
+    assert calls["start"]["extra_env"]["AGENT_TERMINAL_BACKEND"] == "tmux"
+    assert calls["start"]["extra_env"]["AGENT_TMUX_SESSION"] == "clicourier-vps"
+    assert "run" not in calls
+    assert not FakeSettings.notification_block_file.exists()
+
+
 def test_telegram_run_mode_with_default_agent_attaches_visible_tmux_agent(
     tmp_path: Path,
     monkeypatch,
@@ -177,6 +217,7 @@ def test_restart_resumes_last_codex_session_by_default(tmp_path: Path, monkeypat
         calls["start"] = kwargs
         return DaemonStatus(True, 123, tmp_path / "pid", tmp_path / "log")
 
+    monkeypatch.setattr("cli_courier.cli.reset_tmux_session_for_restart", lambda session: calls.setdefault("reset", session))
     monkeypatch.setattr("cli_courier.cli.stop_daemon", fake_stop_daemon)
     monkeypatch.setattr("cli_courier.cli.start_daemon", fake_start_daemon)
     monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
@@ -185,6 +226,7 @@ def test_restart_resumes_last_codex_session_by_default(tmp_path: Path, monkeypat
 
     assert result == 0
     assert calls["stop"] is True
+    assert calls["reset"] == "clicourier-test"
     assert calls["start"]["resume_agent"] is True
     assert calls["start"]["auto_start_agent"] is True
     assert calls["start"]["extra_env"]["AGENT_TERMINAL_BACKEND"] == "tmux"
@@ -237,6 +279,7 @@ def test_restart_attaches_visible_tmux_agent_when_interactive(
     )
     monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
     monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
+    monkeypatch.setattr("cli_courier.cli.reset_tmux_session_for_restart", lambda _session: None)
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
 
@@ -302,6 +345,7 @@ def test_restart_open_terminal_launches_desktop_terminal(tmp_path: Path, monkeyp
     monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
     monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
     monkeypatch.setattr("cli_courier.cli.terminal_attach_commands", lambda _session: [["terminal"]])
+    monkeypatch.setattr("cli_courier.cli.reset_tmux_session_for_restart", lambda _session: None)
     monkeypatch.setenv("DISPLAY", ":0")
 
     class FakePopen:
@@ -340,6 +384,7 @@ def test_restart_open_terminal_infers_desktop_env(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
     monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
     monkeypatch.setattr("cli_courier.cli.terminal_attach_commands", lambda _session: [["terminal"]])
+    monkeypatch.setattr("cli_courier.cli.reset_tmux_session_for_restart", lambda _session: None)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.setattr("cli_courier.cli.desktop_terminal_env", lambda: {"DISPLAY": ":0"})
@@ -448,10 +493,33 @@ def test_wait_for_tmux_session_ignores_dead_pane_before_live_pane(monkeypatch) -
     assert len(calls) == 2
 
 
-def test_infer_adapter_uses_codex_only_for_codex_command() -> None:
+def test_restart_tmux_reset_skips_current_attached_session(monkeypatch) -> None:
+    calls = []
+
+    monkeypatch.setattr("cli_courier.cli.current_tmux_session_name", lambda: "clicourier")
+    monkeypatch.setattr("cli_courier.cli.subprocess.run", lambda command, **kwargs: calls.append(command))
+
+    cli_courier_cli.reset_tmux_session_for_restart("clicourier")
+
+    assert calls == []
+
+
+def test_restart_tmux_reset_kills_stale_agent_session(monkeypatch) -> None:
+    calls = []
+
+    monkeypatch.setattr("cli_courier.cli.current_tmux_session_name", lambda: None)
+    monkeypatch.setattr("cli_courier.cli.subprocess.run", lambda command, **kwargs: calls.append(command))
+
+    cli_courier_cli.reset_tmux_session_for_restart("clicourier")
+
+    assert calls == [["tmux", "kill-session", "-t", "clicourier"]]
+
+
+def test_infer_adapter_uses_known_agent_commands() -> None:
     assert infer_adapter("codex --model x") == "codex"
-    assert infer_adapter("claude") == "generic"
-    assert infer_adapter("gemini") == "generic"
+    assert infer_adapter("claude --dangerously-skip-permissions") == "claude"
+    assert infer_adapter("gemini") == "gemini"
+    assert infer_adapter("python scripts/agent.py") == "generic"
 
 
 def test_clicourier_entrypoint_imports() -> None:
@@ -504,7 +572,7 @@ def test_init_interactive_loads_existing_values_as_defaults(tmp_path: Path, monk
 
     assert 'TELEGRAM_BOT_TOKEN="replace-me"' in text
     assert 'DEFAULT_AGENT_COMMAND="gemini"' in text
-    assert 'DEFAULT_AGENT_ADAPTER="generic"' in text
+    assert 'DEFAULT_AGENT_ADAPTER="gemini"' in text
     assert 'WHISPER_MODEL="turbo"' in text
 
 

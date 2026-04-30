@@ -11,29 +11,28 @@
 # CliCourier
 
 CliCourier is a local-first Telegram bridge for controlling a trusted CLI agent from a
-private Telegram chat. It starts one configured agent command on your workstation, sends
-debounced final CLI output back to Telegram, and exposes a small set of workspace-scoped
-file, approval, screenshot, and voice-transcription commands.
+private Telegram chat. It starts your configured coding tool on your workstation, forwards
+requests from Telegram, and sends back useful output, approvals, files, screenshots, and
+voice transcripts without exposing your whole machine.
 
-The MVP is intentionally single-user and single-session. It is built for a local Linux
-workstation where Telegram is the remote control surface, not the security boundary.
+CliCourier is currently an early beta for a trusted single operator and one active agent
+session at a time. It is built for a local Linux or WSL workstation where Telegram is the
+remote control surface, while the actual work still happens on your machine.
 
 ## Features
 
-- Telegram allowlist gate before every handler.
-- Configured CLI agent only; Telegram users cannot run arbitrary shell commands.
-- Codex CLI adapter, Claude/Gemini fallback adapters, and a generic adapter for testing.
-- Structured JSONL sessions: Codex via `codex exec --json`, Claude Code via `claude --print --output-format stream-json`.
-- Terminal-backed tmux/PTY sessions remain available as fallback for TUI-first agents.
-- One throttled Telegram dashboard message per active session, plus a dedicated `/progress` rolling message and separate final/error/artifact messages.
-- Event-backed approvals with explicit `/approve`, `/reject`, reactions, and pending-action buttons.
-- Workspace sandbox for `/ls`, `/tree`, `/cd`, `/cat`, and `/sendfile`.
-- Sensitive file blocking for env files, private keys, cloud credentials, and token-like names.
-- Newest screenshot artifact retrieval from a configured directory.
-- Local CPU-only `faster-whisper` voice transcription with transcript confirmation before sending.
+- Allowlisted Telegram control for one trusted user.
+- Configured CLI agent only; Telegram messages are never turned into arbitrary shell commands.
+- Codex, Claude Code, Gemini CLI, and generic adapter support.
+- Structured JSONL sessions for Codex, Claude Code, and Gemini CLI, with tmux/PTY fallback for TUI-style tools.
+- Editable Telegram progress output with a rolling 60-line window, silent live updates, and one completion notification when the turn is done.
+- Approvals through inline buttons, `/approve`, `/reject`, short replies, or reactions.
+- Workspace-scoped `/ls`, `/tree`, `/cd`, `/cat`, and `/sendfile`.
+- Sensitive file blocking for env files, private keys, cloud credentials, and token-like filenames.
+- Screenshot artifact lookup and sending from a configured directory.
+- Local `faster-whisper` voice transcription with transcript confirmation before anything reaches the agent.
 - Optional OpenAI voice transcription for users who prefer an API backend.
-- Background daemon controls through the `clicourier` command.
-- A mute/block file so proactive Telegram output can be paused when you are at the computer.
+- Background daemon controls, restart/resume commands, and desktop/Telegram mute modes through `clicourier`.
 
 ## Requirements
 
@@ -69,6 +68,38 @@ From a checkout:
 ```bash
 uv tool install --force .
 ```
+
+## Quick Start
+
+1. Create a Telegram bot with BotFather and copy the token.
+2. Find your numeric Telegram user id.
+3. Run `clicourier init` and paste those values.
+4. `cd` into the project you want the agent to work on.
+5. Start the bridge with `clicourier run -- codex`.
+6. Open the bot chat in Telegram and send a request.
+
+## Telegram Setup
+
+Create a bot token:
+
+1. Open Telegram and start a chat with `@BotFather`.
+2. Send `/newbot`.
+3. Pick a display name, for example `CliCourier`.
+4. Pick a username ending in `bot`, for example `my_clicourier_bot`.
+5. Copy the token BotFather returns. It looks like `123456789:AA...`.
+6. Open your new bot chat and send `/start` once. Telegram bots cannot message you
+   until you have started the private chat.
+
+Find your numeric Telegram user id:
+
+1. Open Telegram and start a chat with `@userinfobot`.
+2. Send `/start`.
+3. Copy the `Id` value it returns, for example `123456789`.
+4. Use that value for `ALLOWED_TELEGRAM_USER_IDS`.
+
+Use the BotFather token as `TELEGRAM_BOT_TOKEN`. Use your numeric id as
+`ALLOWED_TELEGRAM_USER_IDS`. If you want CliCourier to send proactive startup messages,
+use the same numeric id as `DEFAULT_TELEGRAM_CHAT_ID`.
 
 ## Configuration
 
@@ -120,8 +151,8 @@ see. Bridge secrets are not forwarded by default.
 
 `DEFAULT_TELEGRAM_CHAT_ID` is only for proactive background output, such as auto-start
 messages before you send a command. The bot can only message a private chat after you have
-opened the bot in Telegram and sent `/start`; if the chat is not reachable, CliCourier now
-logs that and keeps polling instead of crashing.
+opened the bot in Telegram and sent `/start`; if the chat is not reachable, CliCourier
+logs that and keeps polling.
 
 `AGENT_INITIAL_PROMPT_ENABLED=true` sends a short one-time context note to the CLI agent
 when it starts, explaining that it is being controlled through CliCourier and should keep
@@ -155,17 +186,20 @@ Interactive run:
 clicourier run -- codex
 ```
 
-`clicourier run` asks for `desktop` or `telegram` mode when launched from a terminal.
+`clicourier run` asks for `desktop`, `telegram`, or `detached` mode when launched from a terminal.
 Desktop mode creates the mute file, starts the bridge daemon in the background, and
 attaches to the agent's tmux terminal so the CLI stays visible and usable locally.
 Telegram mode removes the mute file, auto-starts the configured agent in tmux, and
 attaches to that terminal so the console stays visible and interactive while output is
-forwarded to Telegram. If no agent is running when a Telegram request arrives, CliCourier
-starts the configured agent automatically for that chat.
+forwarded to Telegram. Detached mode is the VPS/SSH path: it removes the mute file,
+starts the same tmux-backed daemon, and does not attach, so the bridge and agent keep
+running after the terminal disconnects. If no agent is running when a Telegram request
+arrives, CliCourier starts the configured agent automatically for that chat.
 
 ```bash
 clicourier run --mode telegram -- codex
 clicourier run --mode telegram
+clicourier run --mode detached -- codex
 ```
 
 Background daemon:
@@ -182,6 +216,10 @@ clicourier stop
 Any CLI command can be used after `--`, for example `claude` or `gemini`. For non-Codex
 tools set `DEFAULT_AGENT_ADAPTER` to the matching adapter id (`claude`, `gemini`, or
 `generic`); setup infers this for common commands.
+
+Use desktop mode when you are at the machine and want Telegram to stay quiet. Use Telegram
+mode when you want remote progress, approvals, files, screenshots, and the final `Done.`
+notification in chat.
 
 **Codex** (`DEFAULT_AGENT_ADAPTER=codex`): starts structured turns with
 `codex exec --json <prompt>`; follow-up turns use `codex exec resume --last --json
@@ -200,14 +238,19 @@ clicourier start -- claude --dangerously-skip-permissions
 
 Or set `DEFAULT_AGENT_COMMAND=claude --dangerously-skip-permissions` in `.env`.
 
-Final answers, tool events, and status updates arrive as JSONL events for both Codex and
-Claude. `clicourier restart` and Telegram `/restart` resume the most recent session by
-default; pass `--no-resume` for a fresh session. Local `clicourier restart` starts the
-agent in tmux and attaches when run from an interactive terminal; use `--detach` to
-restart without attaching. Telegram `/restart` uses detached restart, opens a local
-terminal attached to tmux when a desktop terminal is available, and replies with the
-manual `tmux attach` command as fallback. Telegram `/resume` restarts the configured
-agent directly in resume mode.
+**Gemini CLI** (`DEFAULT_AGENT_ADAPTER=gemini`): starts structured turns with
+`gemini --output-format stream-json --yolo --skip-trust --prompt <prompt>`. Follow-up
+turns add `--resume latest` unless your command already provides a resume option.
+
+Final answers, tool events, and status updates arrive as JSONL events for Codex, Claude
+Code, and Gemini CLI. `clicourier restart` and Telegram `/restart` resume the most recent
+session by default; pass `--no-resume` for a fresh session. Local `clicourier restart`
+starts the agent in a fresh tmux session and attaches when run from an interactive
+terminal; use `--detach` to restart without attaching. Telegram `/restart` preserves the
+active agent command, resumes that tool's latest session, opens a local terminal attached
+to tmux when a desktop terminal is available, and replies with the manual `tmux attach`
+command as fallback. Telegram `/resume` restarts the configured agent directly in resume
+mode.
 When you force `AGENT_TERMINAL_BACKEND=tmux` or `pty`, CliCourier falls back to terminal
 capture for local/TUI workflows.
 
@@ -221,8 +264,8 @@ CliCourier no longer parses arbitrary terminal
 output into menu buttons. Inline buttons are only created for explicit bridge states such
 as approvals and voice transcript confirmation.
 
-When an approval action is pending, `yes`, `y`, `ok`, 👍, or a heart approve it; `no`,
-`n`, or 👎 reject it. The inline buttons use pending-action callback ids such as
+When an approval action is pending, `yes`, `y`, `ok`, thumbs-up, or a heart approve it;
+`no`, `n`, or thumbs-down reject it. The inline buttons use pending-action callback ids such as
 `cc:act_...:approve`; stale or unknown callbacks are rejected. If no approval is pending,
 approval-like text is not sent as an approval. Use `/agent yes` to send that text literally.
 
@@ -237,9 +280,12 @@ in Telegram as raw reasoning unless `/trace_on` is enabled. Use `/tail`, `/log`,
 test agent and Telegram Web verification workflow.
 
 For Telegram-originated requests, CliCourier also sends a short `Done.` message after the
-turn completes. This message is intentionally separate from the edited progress message so
-Telegram can raise a normal completion notification, even when desktop mode has muted
-proactive background output.
+turn completes. Structured adapters use their native completion events; terminal/tmux
+adapters use `FINAL_OUTPUT_IDLE_MS` once the output is idle and no approval is pending.
+This message is intentionally separate from the edited progress message so Telegram can
+raise one normal completion notification, even when desktop mode has muted proactive
+background output. Live progress and dashboard messages are sent silently, while approval
+and choice prompts still notify because they require user action.
 
 The daemon log records progress-message operations without message content, for example
 `clicourier agent_output action=progress_send_ok ...`,
@@ -270,30 +316,25 @@ uv run pytest
 The integration test uses `tests/fixtures/fake_agent.py` so PTY behavior can be tested
 without Codex, Claude, Gemini, or a Telegram bot token.
 
-## Known limitations
+## Beta Notes
 
-- The MVP is still single-user and single active agent session.
-- Claude Code structured stream-json (`--print --output-format stream-json`) is fully
-  implemented. Gemini uses the PTY/tmux fallback.
-- Claude Code requires `--dangerously-skip-permissions` (or `--permission-mode
-  bypassPermissions`) in the agent command when running in `--print` mode, because
-  interactive permission prompts cannot be answered over a non-interactive stdin.
-- PTY/tmux fallback can only expose raw terminal deltas; structured streams are preferred
-  whenever an agent supports them because they provide explicit turn completion.
-- The Telegram chat UI is optimized for approvals, final answers, files, and screenshots,
-  not full terminal operation. See the Mini App console note for the future richer UI.
+- CliCourier is built for one trusted operator and one active agent session at a time.
+- Structured streams are preferred because they give reliable turn completion, final
+  answers, and approval events. PTY/tmux fallback is still available for terminal-first
+  tools, but it can only observe raw terminal output.
+- Claude Code requires `--dangerously-skip-permissions` or
+  `--permission-mode bypassPermissions` in the agent command when running in `--print`
+  mode, because interactive permission prompts cannot be answered over non-interactive
+  stdin.
+- Telegram chat is optimized for remote control: send a request, approve actions, receive
+  files/screenshots, and get the final answer. For full terminal work, use the attached
+  local tmux session.
 
 ## WSL
 
-Windows support means WSL for the MVP. Install and run CliCourier inside a Linux
-distribution, use Linux paths such as `/home/you/project`, and run Linux CLI tools from
-inside WSL. Native Windows terminals and PowerShell are not supported yet.
-
-## Docker
-
-Docker is not the recommended path because CliCourier is meant to control host coding
-agents and local workspaces. Local uv or pipx installation is the default. A Docker setup
-can be added later for isolated experiments, but it is not included in this MVP.
+Windows support means WSL. Install and run CliCourier inside a Linux distribution, use
+Linux paths such as `/home/you/project`, and run Linux CLI tools from inside WSL. Native
+Windows terminals and PowerShell are not supported yet.
 
 ## Security
 
@@ -307,6 +348,6 @@ and leave sensitive file sending disabled by default.
 - [COMMANDS.md](COMMANDS.md) lists the Telegram command surface.
 - [SECURITY.md](SECURITY.md) documents the threat model and local hardening notes.
 - [docs/brand.md](docs/brand.md) documents the logo assets and extracted purple-blue palette.
+- [docs/telegram-control-surface.md](docs/telegram-control-surface.md) explains how Telegram is used as the remote control UI.
 - [docs/telegram-message-editing.md](docs/telegram-message-editing.md) documents progress and completion notification behavior.
-- [docs/mini-app-console.md](docs/mini-app-console.md) sketches a future Telegram Mini App console.
-- [ROADMAP.md](ROADMAP.md) tracks planned work beyond the MVP.
+- [STATUS.md](STATUS.md) summarizes the current early-beta scope.

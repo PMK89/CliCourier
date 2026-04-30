@@ -8,11 +8,11 @@ active agent, except approval-like words when no approval is pending.
 | Command | Description |
 | --- | --- |
 | `/botstatus` | Show bridge cwd, agent status, adapter, command, and pending approval state. |
-| `/restart` | Restart the CliCourier daemon, auto-start the agent with Codex resume enabled by default, and open a local tmux terminal when possible. Use `/restart --no-resume` for a fresh agent session. |
+| `/restart` | Restart the CliCourier daemon, auto-start the agent with resume enabled by default, and open a local tmux terminal when possible. Use `/restart --no-resume` for a fresh agent session. |
 | `/start_agent` | Start the configured adapter and `DEFAULT_AGENT_COMMAND`. |
 | `/stop_agent` | Stop the active agent process. |
-| `/restart_agent` | Stop and start the configured agent with Codex resume enabled by default. Use `/restart_agent --no-resume` for a fresh session. |
-| `/resume` | Stop any active agent and start the configured Codex agent with `resume --last`. |
+| `/restart_agent` | Stop and start the configured agent with resume enabled by default. Use `/restart_agent --no-resume` for a fresh session. |
+| `/resume` | Stop any active agent and resume the configured agent's latest session. |
 | `/resume_agent` | Alias for `/resume`. |
 | `/agent <text>` | Send text to the active agent even if it looks like an approval. |
 | `/agents` | List available adapter ids. |
@@ -38,6 +38,7 @@ confirmation.
 
 Desktop/mute mode suppresses proactive background output, but a request you send from
 Telegram still gets its final output and a separate `Done.` completion notification.
+Live progress and dashboard messages are silent; approvals and choices still notify.
 
 ## Approvals
 
@@ -89,9 +90,10 @@ text before approving it.
 | `clicourier model list` | Show configured model, backend, cache status, and known model names. |
 | `clicourier run -- <tool>` | Ask for desktop/telegram mode, start the bridge daemon, auto-start the CLI tool in tmux, and attach locally. |
 | `clicourier run --mode telegram` | Enable Telegram forwarding, auto-start the configured agent in tmux, and attach locally. |
-| `clicourier start --resume -- <tool>` | Run the bridge in the background and auto-start the CLI tool with Codex resume enabled. |
+| `clicourier run --mode detached` | Enable Telegram forwarding, auto-start the configured agent in tmux, and leave it running without attaching. Use this on a VPS or over SSH. |
+| `clicourier start --resume -- <tool>` | Run the bridge in the background and auto-start the CLI tool with resume enabled. |
 | `clicourier stop` | Stop the background bridge. |
-| `clicourier restart -- <tool>` | Restart the bridge, auto-start the agent in tmux, and attach locally when run from a terminal. Codex resume is enabled by default; use `--no-resume` for a fresh session or `--detach` to skip local attach. |
+| `clicourier restart -- <tool>` | Restart the bridge, auto-start the agent in tmux, and attach locally when run from a terminal. Resume is enabled by default; use `--no-resume` for a fresh session or `--detach` to skip local attach. |
 | `clicourier status` | Show daemon pid/log path and mute state. |
 | `clicourier mute` | Create the mute block file. |
 | `clicourier unmute` | Remove the mute block file. |

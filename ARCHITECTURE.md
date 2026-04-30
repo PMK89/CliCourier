@@ -9,8 +9,8 @@ Telegram bot.
 2. `TelegramBridgeBot` registers one Telegram update dispatcher and one callback dispatcher.
 3. Every update passes through allowlist and chat-type authorization.
 4. Slash commands are handled by the bridge. Non-command text is routed to the active agent.
-5. `/start_agent` creates an `AgentSession`. Codex uses structured `codex exec --json`
-   turns by default; explicit tmux/PTY configuration uses terminal fallback.
+5. `/start_agent` creates an `AgentSession`. Structured adapters use JSONL turns by
+   default; explicit tmux/PTY configuration uses terminal fallback.
 6. Agent adapters emit normalized `AgentEvent` objects. Telegram consumes events, updates
    one dashboard message, and sends separate important messages for final answers,
    approvals, errors, screenshots, and artifacts.
@@ -49,16 +49,18 @@ Adapters define:
 - approve and reject input strings;
 - output normalization.
 
-The MVP ships:
+Shipped adapters:
 
 - `codex`: structured JSONL by default, terminal fallback when forced;
-- `claude`: terminal fallback adapter prepared for future stream-json support;
-- `gemini`: terminal fallback adapter prepared for future stream-json support;
+- `claude`: structured `stream-json` turns through `claude --print`, terminal fallback
+  when forced;
+- `gemini`: structured `stream-json` turns through Gemini CLI, terminal fallback when
+  forced;
 - `generic`: conservative fallback and test adapter.
 
-Adding Claude or Gemini should not change Telegram command handling. A new adapter should
-only supply command defaults, capabilities, structured stream parsing when available, and
-approval inputs.
+Adding a new agent should not change Telegram command handling. A new adapter supplies
+command defaults, capabilities, structured stream parsing when available, and approval
+inputs.
 
 ## Process Model
 
@@ -100,17 +102,19 @@ uses the same editable progress-message renderer as structured output.
 The bridge does not chunk agent output into a stream of chat messages. It sends one
 progress message when output starts, edits that same message with the latest 60-line
 rolling window, and force-edits it to the final tail when a structured `final_message`,
-`turn_completed`, or session stop arrives. Structured Codex final answers are sent from
+`turn_completed`, or session stop arrives. Structured final answers are sent from
 `final_message` events, while reasoning/tool/status events are treated as progress/debug
 data and are not shown as raw Telegram messages unless `/trace_on` is enabled.
 
 Telegram maintains one editable dashboard/status message per active session. It shows the
 agent, state, cwd, current tool or phase, last important event, and a short output tail.
 Updates are throttled to avoid flooding the chat and rendered under Telegram's message
-limit.
+limit. Dashboard sends are silent so session startup and status refreshes do not trigger
+audio notifications.
 
 Rolling terminal output uses a separate editable progress message so visible output is
-distinct from the dashboard summary without flooding the chat.
+distinct from the dashboard summary without flooding the chat. Progress sends are silent;
+completion and user-action prompts are the only normal Telegram notifications.
 
 Interactive Telegram requests also get a separate `Done.` message after the turn finishes.
 This completion ping is deliberately not represented as an edit, so Telegram can raise a
@@ -132,13 +136,18 @@ Telegram polling begins.
 mute file, starts the bridge daemon with a tmux-backed agent, and attaches to the tmux
 session. In Telegram mode it removes the mute file, starts the same background daemon,
 and attaches to the tmux-backed agent when an agent command or configured default exists.
-Local `clicourier restart` also forces tmux for the restarted agent and attaches from an
-interactive terminal. Telegram `/restart` uses detached restart and reports the `tmux
-attach` command after asking the restarted CLI process to open a local desktop terminal.
+Detached mode removes the mute file and starts the same tmux-backed daemon without
+attaching, so it survives SSH or VPS terminal disconnects.
+Local `clicourier restart` forces tmux for the restarted agent, clears any stale agent
+tmux session, resumes the latest agent session by default, and attaches from an
+interactive terminal. Telegram `/restart` preserves the active adapter and command in the
+restart environment, supplies the current chat id for auto-start, and asks the restarted
+CLI process to open a local desktop terminal.
 
 `NOTIFICATION_BLOCK_FILE` is a simple mute toggle. The generated default is `muted`, placed
-in the project working directory. When the file exists, proactive agent output and approval
-prompts are not sent to Telegram; command replies still work.
+in the project working directory. When the file exists, proactive background output is
+suppressed. A request that starts from Telegram still receives its final output,
+completion ping, and any approval or choice prompt needed to keep the turn moving.
 
 ## Voice Model
 
@@ -147,7 +156,7 @@ Voice defaults to `WHISPER_BACKEND=local`, implemented with `faster-whisper` on 
 with `ffmpeg` before inference. Models download lazily through faster-whisper or explicitly
 through `clicourier model download`.
 
-`openai` and `whisper_cpp` remain backend options for future or advanced use.
+`openai` and `whisper_cpp` remain optional transcription backends.
 
 Voice files are downloaded to a private temp path, size-checked, transcribed, and deleted.
 The transcript is stored as pending state and is only sent to the agent after

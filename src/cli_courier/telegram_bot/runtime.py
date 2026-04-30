@@ -4,6 +4,7 @@ import asyncio
 import html
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -19,7 +20,7 @@ from cli_courier.agent.approval import (
     interpret_approval_text,
 )
 from cli_courier.agent.chunking import chunk_text
-from cli_courier.agent.output_filter import prepare_agent_output
+from cli_courier.agent.output_filter import agent_output_in_progress, prepare_agent_output
 from cli_courier.agent.session import AgentSession
 from cli_courier.config import AgentOutputMode, Settings, TranscriptionBackend, WhisperBackend
 from cli_courier.filesystem import Sandbox, SandboxViolation
@@ -484,7 +485,14 @@ class TelegramBridgeBot:
         active = self.state.active_agent
         adapter_id = active.adapter.id if active is not None else self.settings.default_agent_adapter
         adapter_name = active.adapter.display_name if active is not None else get_adapter(adapter_id).display_name
-        restart_env = {**os.environ, "DEFAULT_AGENT_ADAPTER": adapter_id}
+        restart_env = {
+            **os.environ,
+            "DEFAULT_AGENT_ADAPTER": adapter_id,
+            "DEFAULT_TELEGRAM_CHAT_ID": str(message.chat_id),
+        }
+        active_command = tuple(getattr(active, "command", ()) or ()) if active is not None else ()
+        if active_command:
+            restart_env["DEFAULT_AGENT_COMMAND"] = shlex.join(str(part) for part in active_command)
         command = _bridge_restart_command(no_resume=no_resume)
         try:
             subprocess.Popen(
@@ -1035,6 +1043,8 @@ class TelegramBridgeBot:
     async def _flush_agent_output(self, bot, chat_id: int, session: AgentSession) -> None:
         pending_text = ""
         interval = self.settings.output_flush_interval_ms / 1000
+        last_output_at: float | None = None
+        completed_terminal_signature: str | None = None
         while self.state.active_agent is session and session.is_running:
             try:
                 event = await asyncio.wait_for(session.output_queue.get(), timeout=interval)
@@ -1065,23 +1075,20 @@ class TelegramBridgeBot:
                         await self._send_turn_done_notification(bot, chat_id, allow_muted=True)
                     continue
                 await self._handle_agent_event(bot, chat_id, session, event)
-                if (
-                    event.kind == AgentEventKind.TURN_COMPLETED
-                    and pending_text
-                    and not self._approval_pending(chat_id)
-                ):
-                    final_text = prepare_agent_output(
-                        pending_text,
-                        suppress_trace_lines=self.settings.suppress_agent_trace_lines,
-                    )
-                    final_text = self._suppress_agent_input_echoes(chat_id, final_text)
+                if event.kind == AgentEventKind.TURN_COMPLETED and not self._approval_pending(chat_id):
                     was_interactive = chat_id in self._interactive_output_chats
-                    await self._send_agent_output(
-                        bot,
-                        chat_id,
-                        final_text,
-                        complete_request=True,
-                    )
+                    if pending_text:
+                        final_text = prepare_agent_output(
+                            pending_text,
+                            suppress_trace_lines=self.settings.suppress_agent_trace_lines,
+                        )
+                        final_text = self._suppress_agent_input_echoes(chat_id, final_text)
+                        await self._send_agent_output(
+                            bot,
+                            chat_id,
+                            final_text,
+                            complete_request=True,
+                        )
                     self._stop_typing(chat_id)
                     pending_text = ""
                     if was_interactive:
@@ -1092,12 +1099,19 @@ class TelegramBridgeBot:
                 if event.kind != AgentEventKind.ASSISTANT_DELTA:
                     await self._maybe_update_dashboard(bot, chat_id, session)
                     continue
+                last_output_at = asyncio.get_running_loop().time()
                 if session.replaces_output_snapshots:
                     pending_text = event.text
                 else:
                     pending_text += event.text
                 progress_text = self._prepare_progress_delta(event.text)
                 progress_text = self._suppress_agent_input_echoes(chat_id, progress_text)
+                progress_signature = progress_text.strip()
+                if completed_terminal_signature and progress_signature == completed_terminal_signature:
+                    await self._maybe_emit_fallback_approval(bot, chat_id, session)
+                    continue
+                if progress_signature:
+                    completed_terminal_signature = None
                 await self._maybe_emit_terminal_choice_request(bot, chat_id, session, pending_text)
                 if progress_text.strip() and not self._approval_pending(chat_id):
                     if session.replaces_output_snapshots:
@@ -1106,6 +1120,18 @@ class TelegramBridgeBot:
                         await self._update_terminal_progress(bot, chat_id, progress_text)
                 await self._maybe_emit_fallback_approval(bot, chat_id, session)
             except asyncio.TimeoutError:
+                completed_signature = await self._maybe_complete_idle_terminal_output(
+                    bot,
+                    chat_id,
+                    session,
+                    pending_text=pending_text,
+                    last_output_at=last_output_at,
+                    completed_signature=completed_terminal_signature,
+                )
+                if completed_signature is not None:
+                    completed_terminal_signature = completed_signature
+                    pending_text = ""
+                    last_output_at = None
                 await self._render_terminal_progress(bot, chat_id)
                 await self._maybe_emit_fallback_approval(bot, chat_id, session)
             await self._send_new_screenshots(bot, chat_id)
@@ -1123,6 +1149,47 @@ class TelegramBridgeBot:
                 complete_request=True,
             )
             self._stop_typing(chat_id)
+
+    async def _maybe_complete_idle_terminal_output(
+        self,
+        bot,
+        chat_id: int,
+        session: AgentSession,
+        *,
+        pending_text: str,
+        last_output_at: float | None,
+        completed_signature: str | None,
+    ) -> str | None:
+        if session.backend == "structured":
+            return None
+        if chat_id not in self._interactive_output_chats:
+            return None
+        if last_output_at is None or not pending_text.strip():
+            return None
+        if self._approval_pending(chat_id):
+            return None
+        now = asyncio.get_running_loop().time()
+        if now - last_output_at < self.settings.final_output_idle_ms / 1000:
+            return None
+        if agent_output_in_progress(pending_text):
+            return None
+        final_text = prepare_agent_output(
+            pending_text,
+            suppress_trace_lines=self.settings.suppress_agent_trace_lines,
+        )
+        final_text = self._suppress_agent_input_echoes(chat_id, final_text)
+        signature = final_text.strip()
+        if not signature or signature == completed_signature:
+            return None
+        await self._send_agent_output(
+            bot,
+            chat_id,
+            final_text,
+            complete_request=True,
+        )
+        self._stop_typing(chat_id)
+        await self._send_turn_done_notification(bot, chat_id, allow_muted=True)
+        return signature
 
     async def _handle_agent_event(
         self,
@@ -1496,7 +1563,12 @@ class TelegramBridgeBot:
         if message_id is None:
             if status.state == "starting":
                 return
-            sent = await self._safe_send_message(bot, chat_id=chat_id, text=text)
+            sent = await self._safe_send_message(
+                bot,
+                chat_id=chat_id,
+                text=text,
+                disable_notification=True,
+            )
             if sent is not None:
                 self._dashboard_message_ids[chat_id] = sent.message_id
                 self._dashboard_last_update[chat_id] = loop_now
@@ -1567,7 +1639,7 @@ class TelegramBridgeBot:
             await self._append_initial_terminal_progress(bot, renderer, text)
             return
         renderer.append_chunk(text)
-        await renderer.render(bot, running=True)
+        await renderer.render(bot, running=True, disable_notification=True)
 
     async def _append_initial_terminal_progress(
         self,
@@ -1579,19 +1651,19 @@ class TelegramBridgeBot:
         for index, segment in enumerate(segments):
             renderer.append_chunk(segment)
             if len(renderer.latest_lines()) >= TERMINAL_PROGRESS_PAGE_LINES:
-                await renderer.render(bot, running=True)
+                await renderer.render(bot, running=True, disable_notification=True)
                 remainder = "".join(segments[index + 1 :])
                 if remainder:
                     renderer.append_chunk(remainder)
-                    await renderer.render(bot, running=True)
+                    await renderer.render(bot, running=True, disable_notification=True)
                 return
-        await renderer.render(bot, running=True)
+        await renderer.render(bot, running=True, disable_notification=True)
 
     async def _render_terminal_progress(self, bot, chat_id: int) -> None:
         renderer = self._terminal_progress_by_chat.get(chat_id)
         if renderer is None:
             return
-        await renderer.render(bot, running=True)
+        await renderer.render(bot, running=True, disable_notification=True)
 
     async def _replace_terminal_progress(self, bot, chat_id: int, text: str) -> None:
         lines = sanitize_terminal_text(text).splitlines()
@@ -1601,7 +1673,7 @@ class TelegramBridgeBot:
             return
         renderer = self._terminal_progress(chat_id)
         renderer.replace_lines(lines)
-        await renderer.render(bot, running=True)
+        await renderer.render(bot, running=True, disable_notification=True)
 
     async def _publish_complete_output(self, bot, chat_id: int, text: str) -> bool:
         lines = sanitize_terminal_text(text).splitlines()
@@ -1621,7 +1693,12 @@ class TelegramBridgeBot:
             source_lines=len(lines),
             visible_lines=len(renderer.latest_lines()),
         )
-        await renderer.render(bot, running=False, force=True)
+        await renderer.render(
+            bot,
+            running=False,
+            force=True,
+            disable_notification=True,
+        )
         return True
 
     def _terminal_progress(self, chat_id: int) -> StreamingMessageRenderer:
@@ -2362,9 +2439,7 @@ def _strip_repeated_echo_prefix(line: str, echo: str) -> str:
     working = line.lstrip()
     removed = 0
     while True:
-        working = working.lstrip()
-        if working.startswith("›"):
-            working = working[1:].lstrip()
+        working = _strip_agent_input_prompt_marker(working)
         if not working.startswith(echo):
             break
         working = working[len(echo) :]
@@ -2374,6 +2449,13 @@ def _strip_repeated_echo_prefix(line: str, echo: str) -> str:
     if removed == 1 and working.strip():
         return line
     return working.lstrip()
+
+
+def _strip_agent_input_prompt_marker(line: str) -> str:
+    working = line.lstrip()
+    while working.startswith(("›", ">")):
+        working = working[1:].lstrip()
+    return re.sub(r"^[\u2580-\u259f\u25a0-\u25ff]\s*", "", working).lstrip()
 
 
 AUDIO_DOCUMENT_EXTENSIONS = {".oga", ".ogg", ".opus", ".mp3", ".m4a", ".wav", ".webm"}

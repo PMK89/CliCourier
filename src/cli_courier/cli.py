@@ -130,6 +130,8 @@ def main(argv: list[str] | None = None) -> int:
         if stopped.running:
             print(f"failed to stop existing clicourier process: {stopped.pid}", file=sys.stderr)
             return 1
+        if restart_plan.should_start_agent and restart_plan.tmux_session:
+            reset_tmux_session_for_restart(restart_plan.tmux_session)
         status = start_daemon(
             config_path=config_path,
             agent_command=agent or None,
@@ -239,24 +241,24 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Run the bridge in the foreground")
     run_parser.add_argument(
         "--mode",
-        choices=("ask", "desktop", "local", "telegram", "foreground"),
+        choices=("ask", "desktop", "local", "telegram", "detached", "vps", "foreground"),
         default="ask",
         help=(
             "desktop/local attaches tmux with Telegram muted; telegram attaches tmux "
-            "unmuted, or starts bridge-only forwarding when no agent command is given"
+            "unmuted; detached/vps starts tmux without attaching"
         ),
     )
     run_parser.add_argument("agent", nargs=argparse.REMAINDER, help="Optional CLI command to auto-start")
 
     start_parser = subparsers.add_parser("start", help="Start the bridge in the background")
-    start_parser.add_argument("--resume", action="store_true", help="Resume the last Codex session")
+    start_parser.add_argument("--resume", action="store_true", help="Resume the last agent session")
     start_parser.add_argument("agent", nargs=argparse.REMAINDER, help="Optional CLI command to auto-start")
 
     restart_parser = subparsers.add_parser("restart", help="Restart the background bridge")
     restart_parser.add_argument(
         "--no-resume",
         action="store_true",
-        help="Start a fresh agent session instead of resuming the last Codex session",
+        help="Start a fresh agent session instead of resuming the last agent session",
     )
     restart_parser.add_argument(
         "--detach",
@@ -331,9 +333,12 @@ def run_with_mode_prompt(
     if selected in {"desktop", "local"}:
         set_mute_file(mute_file, muted=True)
         print(f"desktop mode: Telegram proactive output muted via {mute_file}")
-    elif selected == "telegram":
+    elif selected in {"telegram", "detached"}:
         set_mute_file(mute_file, muted=False)
-        print("telegram mode: proactive Telegram output enabled")
+        if selected == "detached":
+            print("detached mode: proactive Telegram output enabled")
+        else:
+            print("telegram mode: proactive Telegram output enabled")
     else:
         run_app(config_path=config_path)
         return 0
@@ -361,6 +366,11 @@ def run_with_mode_prompt(
     if not should_start_agent:
         print("bridge is forwarding Telegram messages; no agent was started")
         print("use /start_agent from Telegram to start the configured agent")
+        return 0
+
+    if selected == "detached":
+        session_name = extra_env["AGENT_TMUX_SESSION"]
+        print(f"detached agent terminal: tmux attach -t {session_name}")
         return 0
 
     if should_attach_terminal and selected in {"desktop", "local", "telegram"}:
@@ -410,6 +420,33 @@ def restart_agent_terminal_plan(
             "AGENT_TMUX_SESSION": session_name,
         },
     )
+
+
+def reset_tmux_session_for_restart(session_name: str) -> None:
+    if current_tmux_session_name() == session_name:
+        return
+    subprocess.run(
+        ["tmux", "kill-session", "-t", session_name],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def current_tmux_session_name() -> str | None:
+    if not os.environ.get("TMUX"):
+        return None
+    result = subprocess.run(
+        ["tmux", "display-message", "-p", "#S"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
 
 
 def attach_tmux_session(session_name: str) -> int:
@@ -562,17 +599,21 @@ def _read_desktop_env(path: Path) -> dict[str, str]:
 
 
 def normalize_run_mode(mode: str) -> str:
-    return "desktop" if mode == "local" else mode
+    if mode == "local":
+        return "desktop"
+    if mode == "vps":
+        return "detached"
+    return mode
 
 
 def prompt_run_mode() -> str:
     while True:
-        value = input("Run mode: desktop/local or telegram [desktop]: ").strip().lower()
+        value = input("Run mode: desktop/local, telegram, or detached [desktop]: ").strip().lower()
         if not value:
             return "desktop"
-        if value in {"desktop", "local", "telegram", "foreground"}:
+        if value in {"desktop", "local", "telegram", "detached", "vps", "foreground"}:
             return normalize_run_mode(value)
-        print("Choose desktop, local, telegram, or foreground.")
+        print("Choose desktop, local, telegram, detached, or foreground.")
 
 
 def set_mute_file(path: Path, *, muted: bool) -> None:

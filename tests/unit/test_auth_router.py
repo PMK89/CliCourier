@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from cli_courier.agent.adapters import GenericCliAdapter
+from cli_courier.agent.adapters import ClaudeAdapter, GenericCliAdapter
 from cli_courier.agent.events import AgentEvent, AgentEventKind
 from cli_courier.config import Settings
 from cli_courier.filesystem import Sandbox
@@ -329,6 +329,7 @@ async def test_dashboard_update_skips_unchanged_text(tmp_path: Path) -> None:
     await bridge._maybe_update_dashboard(bot_api, 100, session, force=True)
 
     assert len(bot_api.send_calls) == 1
+    assert bot_api.send_kwargs[0]["disable_notification"] is True
     assert bot_api.edit_calls == []
 
 
@@ -455,6 +456,7 @@ class FakeBot:
         self.messages: list[str] = []
         self.reply_markups: list[object] = []
         self.send_calls: list[tuple[int, int, str]] = []
+        self.send_kwargs: list[dict[str, object]] = []
         self.edits: list[tuple[int, str]] = []
         self.edit_calls: list[tuple[int, int, str]] = []
         self.fail_photo = False
@@ -468,6 +470,7 @@ class FakeBot:
         self.messages.append(text)
         self.reply_markups.append(kwargs.get("reply_markup"))
         self.send_calls.append((message_id, chat_id, text))
+        self.send_kwargs.append(kwargs)
         return SimpleNamespace(message_id=message_id)
 
     async def edit_message_text(self, *, chat_id: int, message_id: int, text: str, **kwargs) -> None:
@@ -706,6 +709,48 @@ async def test_muted_interactive_turn_still_sends_done_notification(tmp_path: Pa
         "Finished the requested work.",
         "Done.",
     ]
+    assert bot_api.send_kwargs[0]["disable_notification"] is True
+    assert "disable_notification" not in bot_api.send_kwargs[1]
+
+
+async def test_idle_terminal_turn_sends_done_notification(tmp_path: Path) -> None:
+    app_settings = settings(
+        tmp_path,
+        OUTPUT_FLUSH_INTERVAL_MS="1",
+        FINAL_OUTPUT_IDLE_MS="1",
+    )
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    state.active_agent = session
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot_api = FakeBot()
+    bridge._interactive_output_chats.add(100)
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        await session.output_queue.put("Finished from tmux.\n")
+        for _ in range(100):
+            if non_dashboard_messages(bot_api.messages) == ["Finished from tmux.", "Done."]:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    assert non_dashboard_messages(bot_api.messages) == ["Finished from tmux.", "Done."]
+    assert bot_api.send_kwargs[0]["disable_notification"] is True
+    done_index = bot_api.messages.index("Done.")
+    assert "disable_notification" not in bot_api.send_kwargs[done_index]
 
 
 async def test_muted_telegram_request_still_delivers_approval_prompt(tmp_path: Path) -> None:
@@ -740,6 +785,7 @@ async def test_muted_telegram_request_still_delivers_approval_prompt(tmp_path: P
     )
 
     assert bot_api.messages == ["Approval required:\nRun command?"]
+    assert "disable_notification" not in bot_api.send_kwargs[0]
 
 
 async def test_terminal_progress_posts_after_sixty_lines_and_edits_after_next_sixty(
@@ -764,6 +810,7 @@ async def test_terminal_progress_posts_after_sixty_lines_and_edits_after_next_si
     await bridge._update_terminal_progress(bot_api, 100, first_page)
 
     assert [progress_body(message) for message in bot_api.messages] == [first_page.strip()]
+    assert bot_api.send_kwargs[0]["disable_notification"] is True
     assert bot_api.edits == []
 
     await asyncio.sleep(0.002)
@@ -1251,6 +1298,24 @@ def test_agent_output_suppresses_sent_text_echo(tmp_path: Path) -> None:
     )
 
 
+def test_agent_output_suppresses_codex_prompt_marker_echoes(tmp_path: Path) -> None:
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bridge._remember_agent_input_echo(100, "Run /review on my current changes")
+
+    assert bridge._suppress_agent_input_echoes(100, "> Run /review on my current changes") == ""
+    assert bridge._suppress_agent_input_echoes(100, "▌ Run /review on my current changes") == ""
+
+
 def test_agent_output_strips_repeated_sent_text_echo_prefix(tmp_path: Path) -> None:
     bridge = TelegramBridgeBot(
         settings=settings(tmp_path),
@@ -1327,6 +1392,8 @@ async def test_restart_bridge_command_launches_detached_cli_restart(
 
     assert calls["command"][-3:] == ["restart", "--detach", "--open-terminal"]
     assert calls["kwargs"]["cwd"] == str(tmp_path)
+    assert calls["kwargs"]["env"]["DEFAULT_TELEGRAM_CHAT_ID"] == "100"
+    assert calls["kwargs"]["env"]["DEFAULT_AGENT_ADAPTER"] == "codex"
     assert calls["kwargs"]["start_new_session"] is True
     assert message.replies == [
         "Restarting CliCourier resuming Codex CLI. The bot will reconnect shortly.\n"
@@ -1357,6 +1424,39 @@ async def test_restart_bridge_command_can_disable_resume(tmp_path: Path, monkeyp
     await bot._handle_command(parse_command("/restart --no-resume"), FakeMessage(), FakeContext())
 
     assert calls["command"][-4:] == ["restart", "--detach", "--open-terminal", "--no-resume"]
+
+
+async def test_restart_bridge_preserves_active_agent_command(tmp_path: Path, monkeypatch) -> None:
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = SimpleNamespace(
+        adapter=ClaudeAdapter(),
+        command=("claude", "--dangerously-skip-permissions"),
+    )
+    bot = TelegramBridgeBot(
+        settings=settings(tmp_path, DEFAULT_AGENT_ADAPTER="codex", DEFAULT_AGENT_COMMAND="codex"),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    calls = {}
+
+    class FakePopen:
+        def __init__(self, command, **kwargs) -> None:
+            calls["kwargs"] = kwargs
+
+    monkeypatch.setattr("cli_courier.telegram_bot.runtime.subprocess.Popen", FakePopen)
+
+    await bot._handle_command(parse_command("/restart"), FakeMessage(), FakeContext())
+
+    env = calls["kwargs"]["env"]
+    assert env["DEFAULT_AGENT_ADAPTER"] == "claude"
+    assert env["DEFAULT_AGENT_COMMAND"] == "claude --dangerously-skip-permissions"
+    assert env["DEFAULT_TELEGRAM_CHAT_ID"] == "100"
 
 
 async def test_resume_command_starts_agent_with_required_resume(tmp_path: Path, monkeypatch) -> None:
@@ -2632,6 +2732,56 @@ async def test_flush_agent_output_replaces_tmux_snapshot_progress(tmp_path: Path
         await asyncio.wait_for(task, timeout=1)
 
     assert non_dashboard_messages(bot_api.messages) == ["new output"]
+
+
+async def test_flush_agent_output_skips_codex_start_snapshot_prompt_echo(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path, OUTPUT_FLUSH_INTERVAL_MS="1")
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    session.replaces_output_snapshots = True
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bridge._remember_agent_input_echo(100, "Run /review on my current changes")
+
+    startup_snapshot = (
+        "╭──────────────────────────────────────────────╮\n"
+        "│ >_ OpenAI Codex (v0.125.0)                   │\n"
+        "│ model:     gpt-5.5 xhigh   /model to change  │\n"
+        "│ directory: ~/CliCourier                      │\n"
+        "╰──────────────────────────────────────────────╯\n"
+        "Tip: New Use /fast to enable our fastest inference with increased plan usage.\n"
+        "⚠ `[features].collab` is deprecated.\n"
+        "> Run /review on my current changes\n"
+        "gpt-5.5 xhigh · ~/CliCourier\n"
+    )
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        await session.output_queue.put(startup_snapshot)
+        await asyncio.sleep(0.01)
+        assert non_dashboard_messages(bot_api.messages) == []
+
+        await session.output_queue.put(f"{startup_snapshot}Initial Codex output\n")
+        for _ in range(50):
+            if non_dashboard_messages(bot_api.messages) == ["Initial Codex output"]:
+                break
+            await asyncio.sleep(0.005)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    assert non_dashboard_messages(bot_api.messages) == ["Initial Codex output"]
 
 
 async def test_terminal_progress_keeps_one_message_after_sixty_lines(tmp_path: Path) -> None:
