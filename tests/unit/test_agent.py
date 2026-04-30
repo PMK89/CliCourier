@@ -11,7 +11,7 @@ from cli_courier.agent.events import AgentEvent, AgentEventKind
 from cli_courier.agent.output_filter import agent_output_in_progress, prepare_agent_output
 from cli_courier.agent.session import AgentSession, resolve_agent_backend, resolve_terminal_backend
 from cli_courier.agent.structured import _select_final_message_text
-from cli_courier.agent.tmux import safe_tmux_session_name
+from cli_courier.agent.tmux import TmuxAgentProcess, safe_tmux_session_name
 
 
 def test_adapter_builds_configured_command() -> None:
@@ -157,6 +157,61 @@ def test_agent_session_resets_tmux_snapshot_output_when_capture_scrolls(tmp_path
 
 def test_tmux_session_names_are_sanitized(tmp_path) -> None:
     assert safe_tmux_session_name("Cli Courier:/repo", workspace=tmp_path) == "Cli-Courier-repo"
+
+
+def test_tmux_process_does_not_treat_dead_pane_as_running(tmp_path, monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        if command[:3] == ["tmux", "list-panes", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "1\n"})()
+        if command[:3] == ["tmux", "has-session", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": ""})()
+        raise AssertionError(command)
+
+    monkeypatch.setattr("cli_courier.agent.tmux.subprocess.run", fake_run)
+    process = TmuxAgentProcess(["sh"], cwd=tmp_path, session_name="clicourier")
+
+    assert process.is_running is False
+
+
+async def test_tmux_start_replaces_existing_dead_session(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    has_session = True
+    live_pane = False
+
+    def fake_run(command, **kwargs):
+        nonlocal has_session, live_pane
+        calls.append(command)
+        if command[:3] == ["tmux", "has-session", "-t"]:
+            return type("Result", (), {"returncode": 0 if has_session else 1, "stdout": ""})()
+        if command[:3] == ["tmux", "list-panes", "-t"]:
+            stdout = "0\n" if live_pane else "1\n"
+            return type("Result", (), {"returncode": 0 if has_session else 1, "stdout": stdout})()
+        if command[:3] == ["tmux", "kill-session", "-t"]:
+            has_session = False
+            live_pane = False
+            return type("Result", (), {"returncode": 0, "stdout": ""})()
+        if command[:3] == ["tmux", "new-session", "-d"]:
+            has_session = True
+            live_pane = True
+            return type("Result", (), {"returncode": 0, "stdout": ""})()
+        if command[:3] == ["tmux", "capture-pane", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": ""})()
+        raise AssertionError(command)
+
+    monkeypatch.setattr("cli_courier.agent.tmux.tmux_available", lambda: True)
+    monkeypatch.setattr("cli_courier.agent.tmux.subprocess.run", fake_run)
+    process = TmuxAgentProcess(
+        ["sh"],
+        cwd=tmp_path,
+        session_name="clicourier",
+        poll_interval_seconds=60,
+    )
+
+    await process.start()
+    await process.stop()
+
+    assert ["tmux", "kill-session", "-t", "clicourier"] in calls
+    assert any(command[:3] == ["tmux", "new-session", "-d"] for command in calls)
 
 
 def test_detect_pending_approval_from_recent_output() -> None:

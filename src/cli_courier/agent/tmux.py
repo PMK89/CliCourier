@@ -58,12 +58,16 @@ class TmuxAgentProcess:
 
     @property
     def is_running(self) -> bool:
-        return self._has_session()
+        return self._has_live_pane()
 
     async def start(self) -> None:
         if not tmux_available():
             raise RuntimeError("tmux is required for AGENT_TERMINAL_BACKEND=tmux")
-        if not self._has_session():
+        session_exists = self._has_session()
+        if session_exists and not self._has_live_pane():
+            await asyncio.to_thread(self._kill_session)
+            session_exists = False
+        if not session_exists:
             await asyncio.to_thread(self._new_session)
             self._created_session = True
         self._reader_task = asyncio.create_task(self._read_loop())
@@ -77,13 +81,7 @@ class TmuxAgentProcess:
                 pass
             self._reader_task = None
         if self._created_session and self._has_session():
-            await asyncio.to_thread(
-                subprocess.run,
-                ["tmux", "kill-session", "-t", self.session_name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
+            await asyncio.to_thread(self._kill_session)
 
     async def send_line(self, text: str, *, submit_sequence: str = "Enter") -> None:
         if not self.is_running:
@@ -116,6 +114,14 @@ class TmuxAgentProcess:
             check=True,
         )
 
+    def _kill_session(self) -> None:
+        subprocess.run(
+            ["tmux", "kill-session", "-t", self.session_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
     def _shell_command(self) -> str:
         assignments = " ".join(_shell_assignment(key, value) for key, value in self.env.items())
         command = shlex.join(self.command)
@@ -140,7 +146,7 @@ class TmuxAgentProcess:
         subprocess.run(["tmux", "send-keys", "-t", self.target, key], check=True)
 
     async def _read_loop(self) -> None:
-        while self._has_session():
+        while self._has_live_pane():
             snapshot = await asyncio.to_thread(self._capture_snapshot)
             if snapshot and snapshot != self._last_snapshot:
                 await self.output_queue.put(snapshot)
@@ -174,6 +180,18 @@ class TmuxAgentProcess:
             check=False,
         )
         return result.returncode == 0
+
+    def _has_live_pane(self) -> bool:
+        result = subprocess.run(
+            ["tmux", "list-panes", "-t", self.session_name, "-F", "#{pane_dead}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return False
+        return any(line.strip() == "0" for line in result.stdout.splitlines())
 
 
 def _shell_assignment(key: str, value: str) -> str:

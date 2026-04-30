@@ -586,16 +586,23 @@ def set_mute_file(path: Path, *, muted: bool) -> None:
 def wait_for_tmux_session(session_name: str, *, timeout_seconds: float = 12.0) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        result = subprocess.run(
-            ["tmux", "has-session", "-t", session_name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        if result.returncode == 0:
+        if tmux_session_has_live_pane(session_name):
             return True
         time.sleep(0.2)
     return False
+
+
+def tmux_session_has_live_pane(session_name: str) -> bool:
+    result = subprocess.run(
+        ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_dead}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    return any(line.strip() == "0" for line in result.stdout.splitlines())
 
 
 def print_config(config_path: Path | None) -> int:

@@ -10,6 +10,7 @@ import clicourier.cli
 from cli_courier.cli import normalize_remainder
 from cli_courier.cli import normalize_run_mode, run_with_mode_prompt, set_mute_file
 from cli_courier.cli import desktop_terminal_env, launch_tmux_terminal, terminal_attach_command
+from cli_courier.cli import wait_for_tmux_session
 from cli_courier.doctor import collect_checks
 from cli_courier.local_config import default_state_dir
 from cli_courier.setup import (
@@ -428,6 +429,23 @@ def test_launch_tmux_terminal_falls_back_after_failed_terminal(monkeypatch) -> N
         ["bad-terminal"],
         ["xterm", "-e", "tmux", "attach", "-t", "clicourier"],
     ]
+
+
+def test_wait_for_tmux_session_ignores_dead_pane_before_live_pane(monkeypatch) -> None:
+    pane_states = ["1\n", "0\n"]
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[:3] == ["tmux", "list-panes", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": pane_states.pop(0)})()
+        raise AssertionError(command)
+
+    monkeypatch.setattr("cli_courier.cli.subprocess.run", fake_run)
+    monkeypatch.setattr("cli_courier.cli.time.sleep", lambda _seconds: None)
+
+    assert wait_for_tmux_session("clicourier", timeout_seconds=1) is True
+    assert len(calls) == 2
 
 
 def test_infer_adapter_uses_codex_only_for_codex_command() -> None:
