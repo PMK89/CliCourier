@@ -485,6 +485,7 @@ class FakeBot:
         self.send_kwargs: list[dict[str, object]] = []
         self.edits: list[tuple[int, str]] = []
         self.edit_calls: list[tuple[int, int, str]] = []
+        self.deleted_messages: list[tuple[int, int]] = []
         self.fail_photo = False
         self.commands = None
 
@@ -504,6 +505,9 @@ class FakeBot:
         self.edit_calls.append((message_id, chat_id, text))
         if 1 <= message_id <= len(self.messages):
             self.messages[message_id - 1] = text
+
+    async def delete_message(self, *, chat_id: int, message_id: int) -> None:
+        self.deleted_messages.append((chat_id, message_id))
 
     async def set_my_commands(self, commands) -> None:
         self.commands = commands
@@ -692,6 +696,7 @@ async def test_muted_interactive_turn_still_sends_done_notification(tmp_path: Pa
         tmp_path,
         NOTIFICATION_BLOCK_FILE=str(tmp_path / ".muted"),
         OUTPUT_FLUSH_INTERVAL_MS="1",
+        DONE_NOTIFICATION_DELETE_AFTER_SECONDS="0",
     )
     app_settings.notification_block_file.write_text("muted\n", encoding="utf-8")
     state = RuntimeState.create(tmp_path)
@@ -739,11 +744,40 @@ async def test_muted_interactive_turn_still_sends_done_notification(tmp_path: Pa
     assert "disable_notification" not in bot_api.send_kwargs[1]
 
 
+async def test_done_notification_schedules_cleanup(tmp_path: Path, monkeypatch) -> None:
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path, DONE_NOTIFICATION_DELETE_AFTER_SECONDS="12"),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot_api = FakeBot()
+    cleanup_calls: list[tuple[int, int, int]] = []
+
+    async def fake_delete_message_after_delay(bot, chat_id: int, message_id: int, delay_seconds: int) -> None:
+        assert bot is bot_api
+        cleanup_calls.append((chat_id, message_id, delay_seconds))
+
+    monkeypatch.setattr(bridge, "_delete_message_after_delay", fake_delete_message_after_delay)
+
+    await bridge._send_turn_done_notification(bot_api, 100, allow_muted=True)
+    await asyncio.sleep(0)
+
+    assert bot_api.messages == ["Done."]
+    assert cleanup_calls == [(100, 1, 12)]
+
+
 async def test_idle_terminal_turn_sends_done_notification(tmp_path: Path) -> None:
     app_settings = settings(
         tmp_path,
         OUTPUT_FLUSH_INTERVAL_MS="1",
         FINAL_OUTPUT_IDLE_MS="1",
+        DONE_NOTIFICATION_DELETE_AFTER_SECONDS="0",
     )
     state = RuntimeState.create(tmp_path)
     session = FakeFlushSession()
@@ -2743,6 +2777,7 @@ async def test_flush_agent_output_replaces_tmux_snapshot_progress(tmp_path: Path
         ),
         transcriber=DisabledTranscriber(),
     )
+    bridge._interactive_output_chats.add(100)
 
     task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
     try:
@@ -2758,6 +2793,36 @@ async def test_flush_agent_output_replaces_tmux_snapshot_progress(tmp_path: Path
         await asyncio.wait_for(task, timeout=1)
 
     assert non_dashboard_messages(bot_api.messages) == ["new output"]
+
+
+async def test_flush_agent_output_suppresses_noninteractive_tmux_snapshot(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path, OUTPUT_FLUSH_INTERVAL_MS="1")
+    state = RuntimeState.create(tmp_path)
+    session = FakeFlushSession()
+    session.replaces_output_snapshots = True
+    state.active_agent = session
+    bot_api = FakeBot()
+    bridge = TelegramBridgeBot(
+        settings=app_settings,
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+
+    task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
+    try:
+        await session.output_queue.put("old prompt\nold output\n")
+        await asyncio.sleep(0.01)
+    finally:
+        session.is_running = False
+        await asyncio.wait_for(task, timeout=1)
+
+    assert non_dashboard_messages(bot_api.messages) == []
 
 
 async def test_flush_agent_output_skips_codex_start_snapshot_prompt_echo(tmp_path: Path) -> None:
@@ -2778,6 +2843,7 @@ async def test_flush_agent_output_skips_codex_start_snapshot_prompt_echo(tmp_pat
         ),
         transcriber=DisabledTranscriber(),
     )
+    bridge._interactive_output_chats.add(100)
     bridge._remember_agent_input_echo(100, "Run /review on my current changes")
 
     startup_snapshot = (

@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     output_flush_interval_ms: int = Field(default=1000, alias="OUTPUT_FLUSH_INTERVAL_MS")
     final_output_idle_ms: int = Field(default=2500, alias="FINAL_OUTPUT_IDLE_MS")
     final_output_max_wait_ms: int = Field(default=120000, alias="FINAL_OUTPUT_MAX_WAIT_MS")
+    done_notification_delete_after_seconds: int = Field(
+        default=30,
+        alias="DONE_NOTIFICATION_DELETE_AFTER_SECONDS",
+    )
     recent_output_max_chars: int = Field(default=100000, alias="RECENT_OUTPUT_MAX_CHARS")
     cat_max_bytes: int = Field(default=65536, alias="CAT_MAX_BYTES")
     sendfile_max_bytes: int = Field(default=10485760, alias="SENDFILE_MAX_BYTES")

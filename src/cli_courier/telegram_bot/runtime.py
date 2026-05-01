@@ -1168,18 +1168,23 @@ class TelegramBridgeBot:
                 progress_text = self._prepare_progress_delta(event.text)
                 progress_text = self._suppress_agent_input_echoes(chat_id, progress_text)
                 progress_signature = progress_text.strip()
+                is_interactive = chat_id in self._interactive_output_chats
+                should_forward_progress = is_interactive or not session.replaces_output_snapshots
                 if completed_terminal_signature and progress_signature == completed_terminal_signature:
-                    await self._maybe_emit_fallback_approval(bot, chat_id, session)
+                    if should_forward_progress:
+                        await self._maybe_emit_fallback_approval(bot, chat_id, session)
                     continue
                 if progress_signature:
                     completed_terminal_signature = None
-                await self._maybe_emit_terminal_choice_request(bot, chat_id, session, pending_text)
-                if progress_text.strip() and not self._approval_pending(chat_id):
+                if is_interactive:
+                    await self._maybe_emit_terminal_choice_request(bot, chat_id, session, pending_text)
+                if progress_text.strip() and not self._approval_pending(chat_id) and should_forward_progress:
                     if session.replaces_output_snapshots:
                         await self._replace_terminal_progress(bot, chat_id, progress_text)
                     else:
                         await self._update_terminal_progress(bot, chat_id, progress_text)
-                await self._maybe_emit_fallback_approval(bot, chat_id, session)
+                if should_forward_progress:
+                    await self._maybe_emit_fallback_approval(bot, chat_id, session)
             except asyncio.TimeoutError:
                 completed_signature = await self._maybe_complete_idle_terminal_output(
                     bot,
@@ -1194,10 +1199,11 @@ class TelegramBridgeBot:
                     pending_text = ""
                     last_output_at = None
                 await self._render_terminal_progress(bot, chat_id)
-                await self._maybe_emit_fallback_approval(bot, chat_id, session)
+                if chat_id in self._interactive_output_chats or not session.replaces_output_snapshots:
+                    await self._maybe_emit_fallback_approval(bot, chat_id, session)
             await self._send_new_screenshots(bot, chat_id)
             await self._maybe_update_dashboard(bot, chat_id, session)
-        if pending_text:
+        if pending_text and (chat_id in self._interactive_output_chats or not session.replaces_output_snapshots):
             final_text = prepare_agent_output(
                 pending_text,
                 suppress_trace_lines=self.settings.suppress_agent_trace_lines,
@@ -1398,7 +1404,29 @@ class TelegramBridgeBot:
             return
         if self._approval_pending(chat_id):
             return
-        await self._safe_send_message(bot, chat_id=chat_id, text="Done.")
+        sent = await self._safe_send_message(bot, chat_id=chat_id, text="Done.")
+        delete_after = self.settings.done_notification_delete_after_seconds
+        if sent is not None and delete_after > 0:
+            self._create_background_task(
+                None,
+                self._delete_message_after_delay(bot, chat_id, sent.message_id, delete_after),
+            )
+
+    async def _delete_message_after_delay(
+        self,
+        bot,
+        chat_id: int,
+        message_id: int,
+        delay_seconds: int,
+    ) -> None:
+        await asyncio.sleep(delay_seconds)
+        delete_message = getattr(bot, "delete_message", None)
+        if delete_message is None:
+            return
+        try:
+            await delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception as exc:  # noqa: BLE001 - cleanup should not crash the bridge
+            print(f"telegram delete failed: {exc}", flush=True)
 
     async def _send_choice_request_event(
         self,
