@@ -93,6 +93,9 @@ class TelegramBridgeBot:
         self._dashboard_last_update: dict[int, float] = {}
         self._dashboard_last_text: dict[int, str] = {}
         self._terminal_progress_by_chat: dict[int, StreamingMessageRenderer] = {}
+        self._agent_output_task: asyncio.Task[None] | None = None
+        self._agent_output_session: AgentSession | None = None
+        self._agent_output_chat_id: int | None = None
 
     def build_application(self):
         from telegram.ext import (
@@ -121,6 +124,13 @@ class TelegramBridgeBot:
         if not self.settings.auto_start_agent:
             return
         if self.settings.default_telegram_chat_id is None:
+            try:
+                await self._start_agent_session(
+                    chat_id=None,
+                    application=application,
+                )
+            except Exception as exc:  # noqa: BLE001 - daemon log should capture startup failures
+                print(f"failed to auto-start terminal-only agent: {exc}", flush=True)
             return
         if not self._notifications_muted():
             reachable = await self._safe_send_chat_action(
@@ -131,9 +141,16 @@ class TelegramBridgeBot:
             if not reachable:
                 print(
                     "auto-start skipped: DEFAULT_TELEGRAM_CHAT_ID is not reachable. "
-                    "Open the bot in Telegram and send /start, or clear DEFAULT_TELEGRAM_CHAT_ID.",
+                    "Starting the local terminal session without Telegram output.",
                     flush=True,
                 )
+                try:
+                    await self._start_agent_session(
+                        chat_id=None,
+                        application=application,
+                    )
+                except Exception as exc:  # noqa: BLE001 - daemon log should capture startup failures
+                    print(f"failed to auto-start terminal-only agent: {exc}", flush=True)
                 return
         try:
             await self._start_agent_session(
@@ -394,7 +411,7 @@ class TelegramBridgeBot:
     async def _start_agent_session(
         self,
         *,
-        chat_id: int,
+        chat_id: int | None,
         application=None,
         bot=None,
         resume: bool = False,
@@ -424,15 +441,13 @@ class TelegramBridgeBot:
         self._last_choice_signature = None
         self._agent_context_sent = False
         self.state.clear_pending_actions()
-        target_bot = application.bot if application is not None else bot
-        if target_bot is None:
-            raise RuntimeError("Telegram bot context is not available.")
-        task = self._create_background_task(
-            application,
-            self._flush_agent_output(target_bot, chat_id, session),
-        )
-        self._flush_tasks.add(task)
-        task.add_done_callback(self._flush_tasks.discard)
+        if chat_id is not None:
+            self._ensure_agent_output_forwarding(
+                chat_id=chat_id,
+                session=session,
+                application=application,
+                bot=bot,
+            )
         action = "resumed" if resume_last else "started"
         return f"Agent {action}: {' '.join(session.command)}"
 
@@ -920,6 +935,13 @@ class TelegramBridgeBot:
         )
         user_text = prompt_text if preserve_leading_slash else self._agent_user_text(prompt_text, chat_id=chat_id)
         if chat_id is not None:
+            if isinstance(agent, AgentSession):
+                self._ensure_agent_output_forwarding(
+                    chat_id=chat_id,
+                    session=agent,
+                    application=application,
+                    bot=bot,
+                )
             history = self._chat_history(chat_id)
             if history is not None:
                 history.append(role="user", text=text)
@@ -931,6 +953,45 @@ class TelegramBridgeBot:
         self._last_approval_signature = None
         self._last_choice_signature = None
         await agent.send_text(user_text)
+
+    def _ensure_agent_output_forwarding(
+        self,
+        *,
+        chat_id: int,
+        session: AgentSession,
+        application=None,
+        bot=None,
+    ) -> None:
+        if (
+            self._agent_output_task is not None
+            and not self._agent_output_task.done()
+            and self._agent_output_session is session
+            and self._agent_output_chat_id == chat_id
+        ):
+            return
+        if self._agent_output_task is not None and not self._agent_output_task.done():
+            self._agent_output_task.cancel()
+        target_bot = application.bot if application is not None else bot
+        if target_bot is None:
+            raise RuntimeError("Telegram bot context is not available.")
+        task = self._create_background_task(
+            application,
+            self._flush_agent_output(target_bot, chat_id, session),
+        )
+        self._agent_output_task = task
+        self._agent_output_session = session
+        self._agent_output_chat_id = chat_id
+        self.state.agent_chat_id = chat_id
+        self._flush_tasks.add(task)
+
+        def _forget_task(done_task: asyncio.Task[None]) -> None:
+            self._flush_tasks.discard(done_task)
+            if self._agent_output_task is done_task:
+                self._agent_output_task = None
+                self._agent_output_session = None
+                self._agent_output_chat_id = None
+
+        task.add_done_callback(_forget_task)
 
     async def _handle_approval(self, decision: ApprovalDecision, message, context) -> None:
         pending = self.state.active_pending_action("approval", chat_id=message.chat_id)

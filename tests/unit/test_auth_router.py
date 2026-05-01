@@ -384,6 +384,32 @@ def test_initial_agent_context_is_prepended_once(tmp_path: Path) -> None:
     assert second == "Next task"
 
 
+async def test_post_init_auto_starts_terminal_only_without_default_chat(tmp_path: Path, monkeypatch) -> None:
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path, AUTO_START_AGENT=True, DEFAULT_TELEGRAM_CHAT_ID=""),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    captured = {}
+
+    async def fake_start_agent_session(**kwargs) -> str:
+        captured.update(kwargs)
+        return "Agent started: codex"
+
+    monkeypatch.setattr(bridge, "_start_agent_session", fake_start_agent_session)
+
+    await bridge._post_init(SimpleNamespace(bot=FakeBot()))
+
+    assert captured["chat_id"] is None
+    assert captured["application"].bot.commands is not None
+
+
 class FakeAgent:
     is_running = True
     adapter = GenericCliAdapter()

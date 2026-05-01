@@ -216,6 +216,8 @@ def resolve_terminal_backend(value: str) -> str:
 
 
 def resolve_agent_backend(adapter: AgentAdapter, terminal_backend: str) -> str:
+    if terminal_backend == "auto" and shutil.which("tmux"):
+        return "tmux"
     if terminal_backend == "auto" and adapter.capabilities.supports_structured_stream:
         return "structured"
     return resolve_terminal_backend(terminal_backend)

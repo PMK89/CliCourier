@@ -53,8 +53,9 @@ def yes_no(label: str, *, default: bool = True) -> bool:
 
 def infer_adapter(command: str) -> str:
     head = command.strip().split(maxsplit=1)[0] if command.strip() else ""
-    if Path(head).name == "codex":
-        return "codex"
+    executable = Path(head).name.lower()
+    if executable in {"codex", "claude", "gemini"}:
+        return executable
     return "generic"
 
 

@@ -140,10 +140,17 @@ class TmuxAgentProcess:
                 ["tmux", "send-keys", "-t", self.target, "-l", normalized],
                 check=True,
             )
-            if self.submit_delay_seconds > 0:
-                time.sleep(self.submit_delay_seconds)
+            delay = self._submit_delay_for_text(normalized)
+            if delay > 0:
+                time.sleep(delay)
         key = submit_sequence if submit_sequence and len(submit_sequence) > 1 else "Enter"
         subprocess.run(["tmux", "send-keys", "-t", self.target, key], check=True)
+
+    def _submit_delay_for_text(self, text: str) -> float:
+        if not text:
+            return 0
+        scaled_delay = min(2.0, 0.15 + (len(text) / 4000))
+        return max(self.submit_delay_seconds, scaled_delay)
 
     async def _read_loop(self) -> None:
         while self._has_live_pane():

@@ -242,7 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--mode",
         choices=("ask", "desktop", "local", "telegram", "detached", "vps", "foreground"),
-        default="ask",
+        default="telegram",
         help=(
             "desktop/local attaches tmux with Telegram muted; telegram attaches tmux "
             "unmuted; detached/vps starts tmux without attaching"

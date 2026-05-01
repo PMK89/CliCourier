@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from cli_courier.agent.adapters import ClaudeAdapter, CodexAdapter, GenericCliAdapter
+from cli_courier.agent.adapters import ClaudeAdapter, CodexAdapter, GeminiAdapter, GenericCliAdapter
 from cli_courier.agent.approval import detect_pending_approval, interpret_approval_text
 from cli_courier.agent.chunking import OutputRingBuffer, chunk_text
 from cli_courier.agent.claude_jsonl import parse_claude_jsonl_line
@@ -64,7 +64,15 @@ def test_resolve_terminal_backend_accepts_explicit_modes() -> None:
     assert resolve_terminal_backend("tmux") == "tmux"
 
 
-def test_codex_defaults_to_structured_backend() -> None:
+def test_auto_backend_prefers_tmux_when_available(monkeypatch) -> None:
+    monkeypatch.setattr("cli_courier.agent.session.shutil.which", lambda name: "/usr/bin/tmux")
+
+    assert resolve_agent_backend(CodexAdapter(), "auto") == "tmux"
+
+
+def test_codex_auto_backend_uses_structured_without_tmux(monkeypatch) -> None:
+    monkeypatch.setattr("cli_courier.agent.session.shutil.which", lambda name: None)
+
     assert resolve_agent_backend(CodexAdapter(), "auto") == "structured"
 
 
@@ -98,7 +106,35 @@ def test_agent_session_uses_resume_command_for_codex_terminal_backend(tmp_path) 
     assert session.command == ["codex", "resume", "--last", "--model", "gpt-5.5"]
 
 
-def test_agent_session_uses_resume_last_for_codex_structured_backend(tmp_path) -> None:
+def test_agent_session_uses_resume_command_for_claude_terminal_backend(tmp_path) -> None:
+    session = AgentSession(
+        adapter=ClaudeAdapter(),
+        command=["claude", "--dangerously-skip-permissions"],
+        cwd=tmp_path,
+        recent_output_max_chars=1000,
+        terminal_backend="tmux",
+        resume_last=True,
+    )
+
+    assert session.command == ["claude", "--dangerously-skip-permissions", "--continue"]
+
+
+def test_agent_session_uses_resume_command_for_gemini_terminal_backend(tmp_path) -> None:
+    session = AgentSession(
+        adapter=GeminiAdapter(),
+        command=["gemini"],
+        cwd=tmp_path,
+        recent_output_max_chars=1000,
+        terminal_backend="tmux",
+        resume_last=True,
+    )
+
+    assert session.command == ["gemini", "--resume", "latest"]
+
+
+def test_agent_session_uses_resume_last_for_codex_structured_backend(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("cli_courier.agent.session.shutil.which", lambda name: None)
+
     session = AgentSession(
         adapter=CodexAdapter(),
         command=["codex"],
@@ -171,6 +207,29 @@ def test_tmux_process_does_not_treat_dead_pane_as_running(tmp_path, monkeypatch)
     process = TmuxAgentProcess(["sh"], cwd=tmp_path, session_name="clicourier")
 
     assert process.is_running is False
+
+
+def test_tmux_process_waits_longer_before_submitting_large_text(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return type("Result", (), {"returncode": 0, "stdout": ""})()
+
+    monkeypatch.setattr("cli_courier.agent.tmux.subprocess.run", fake_run)
+    monkeypatch.setattr("cli_courier.agent.tmux.time.sleep", lambda seconds: sleeps.append(seconds))
+    process = TmuxAgentProcess(
+        ["sh"],
+        cwd=tmp_path,
+        session_name="clicourier",
+        submit_delay_seconds=0.05,
+    )
+
+    process._send_text_with_submit("x" * 4000, "\r")
+
+    assert sleeps == [1.15]
+    assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
 
 
 async def test_tmux_start_replaces_existing_dead_session(tmp_path, monkeypatch) -> None:
@@ -619,7 +678,9 @@ def test_codex_jsonl_filters_prompt_placeholder_choice_labels() -> None:
 # Claude Code adapter tests
 
 
-def test_claude_adapter_defaults_to_structured_backend() -> None:
+def test_claude_auto_backend_uses_structured_without_tmux(monkeypatch) -> None:
+    monkeypatch.setattr("cli_courier.agent.session.shutil.which", lambda name: None)
+
     assert resolve_agent_backend(ClaudeAdapter(), "auto") == "structured"
 
 

@@ -49,15 +49,33 @@ fi
 
 command -v uv >/dev/null 2>&1 || fail "uv was installed but is not available on PATH."
 
-if [ -d ".git" ] && [ -f "pyproject.toml" ]; then
+is_clicourier_checkout() {
+  [ -d ".git" ] && [ -f "pyproject.toml" ] || return 1
+  python3 - <<'PY'
+from pathlib import Path
+import tomllib
+
+try:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8")).get("project", {})
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if project.get("name") == "cli-courier" else 1)
+PY
+}
+
+if is_clicourier_checkout; then
   INSTALL_TARGET="$(pwd)"
 else
   INSTALL_TARGET="git+$REPO_URL"
 fi
 
 info "Platform: $PLATFORM"
-info "Installing CliCourier as a uv tool from: $INSTALL_TARGET"
-uv tool install --force "$INSTALL_TARGET"
+if command -v clicourier >/dev/null 2>&1 || command -v cli-courier >/dev/null 2>&1; then
+  info "Existing CliCourier install detected; updating from: $INSTALL_TARGET"
+else
+  info "Installing CliCourier as a uv tool from: $INSTALL_TARGET"
+fi
+uv tool install --force --upgrade --reinstall-package cli-courier "$INSTALL_TARGET"
 
 mkdir -p "$HOME/.config/clicourier"
 mkdir -p "$HOME/.local/state/clicourier"

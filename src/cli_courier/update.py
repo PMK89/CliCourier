@@ -4,7 +4,11 @@ import os
 import subprocess
 import shutil
 from dataclasses import dataclass, field
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+
+PACKAGE_NAME = "cli-courier"
+DEFAULT_REPO_URL = "https://github.com/PMK89/CliCourier.git"
 
 
 @dataclass
@@ -43,7 +47,7 @@ def run_update() -> UpdateResult:
     try:
         repo = find_repo_root()
     except RuntimeError as exc:
-        return UpdateResult(success=False, before_hash="?", after_hash="?", changed=False, error=str(exc))
+        return run_tool_update(repo_error=str(exc))
 
     _git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
@@ -121,11 +125,21 @@ def run_update() -> UpdateResult:
             after_hash=after_hash,
             changed=changed,
             lines=lines,
-            error="uv not found on PATH; run `uv tool install --force --editable .` manually",
+            error="uv not found on PATH; reinstall with the one-command installer",
         )
     try:
         install = subprocess.run(
-            [uv, "tool", "install", "--force", "--editable", str(repo)],
+            [
+                uv,
+                "tool",
+                "install",
+                "--force",
+                "--upgrade",
+                "--reinstall-package",
+                PACKAGE_NAME,
+                "--editable",
+                str(repo),
+            ],
             capture_output=True,
             text=True,
             check=False,
@@ -160,3 +174,73 @@ def run_update() -> UpdateResult:
         changed=changed,
         lines=lines,
     )
+
+
+def run_tool_update(*, repo_error: str) -> UpdateResult:
+    before_version = installed_version()
+    uv = shutil.which("uv")
+    if uv is None:
+        return UpdateResult(
+            success=False,
+            before_hash=before_version,
+            after_hash=before_version,
+            changed=False,
+            error=(
+                f"{repo_error}; uv not found on PATH. Reinstall with: "
+                "curl -LsSf https://raw.githubusercontent.com/PMK89/CliCourier/main/install.sh | sh"
+            ),
+        )
+    lines = [repo_error, "No editable checkout found; reinstalling the uv tool from GitHub."]
+    target = f"git+{DEFAULT_REPO_URL}"
+    try:
+        install = subprocess.run(
+            [
+                uv,
+                "tool",
+                "install",
+                "--force",
+                "--upgrade",
+                "--reinstall-package",
+                PACKAGE_NAME,
+                target,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        return UpdateResult(
+            success=False,
+            before_hash=before_version,
+            after_hash=before_version,
+            changed=False,
+            lines=lines,
+            error="uv install timed out after 300s",
+        )
+    if install.returncode != 0:
+        msg = (install.stderr or install.stdout).strip()
+        return UpdateResult(
+            success=False,
+            before_hash=before_version,
+            after_hash=before_version,
+            changed=False,
+            lines=lines,
+            error=f"uv install failed: {msg}",
+        )
+    lines.append("uv tool install complete.")
+    return UpdateResult(
+        success=True,
+        before_hash=before_version,
+        after_hash="latest",
+        changed=True,
+        lines=lines,
+    )
+
+
+def installed_version() -> str:
+    try:
+        return version(PACKAGE_NAME)
+    except PackageNotFoundError:
+        return "?"

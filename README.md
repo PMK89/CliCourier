@@ -186,15 +186,12 @@ Interactive run:
 clicourier run -- codex
 ```
 
-`clicourier run` asks for `desktop`, `telegram`, or `detached` mode when launched from a terminal.
-Desktop mode creates the mute file, starts the bridge daemon in the background, and
-attaches to the agent's tmux terminal so the CLI stays visible and usable locally.
-Telegram mode removes the mute file, auto-starts the configured agent in tmux, and
-attaches to that terminal so the console stays visible and interactive while output is
-forwarded to Telegram. Detached mode is the VPS/SSH path: it removes the mute file,
-starts the same tmux-backed daemon, and does not attach, so the bridge and agent keep
-running after the terminal disconnects. If no agent is running when a Telegram request
-arrives, CliCourier starts the configured agent automatically for that chat.
+`clicourier run` defaults to Telegram mode: it removes the mute file, starts the
+bridge daemon in the background, auto-starts the configured agent in tmux, and attaches
+to that terminal in the same shell. The console stays visible and interactive while
+output is forwarded to Telegram, and the tmux session keeps running if the terminal or
+SSH connection closes. Desktop mode mutes proactive Telegram output. Detached mode is
+the VPS/SSH path: it starts the same tmux-backed daemon but does not attach.
 
 ```bash
 clicourier run --mode telegram -- codex

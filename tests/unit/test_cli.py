@@ -79,6 +79,22 @@ def test_telegram_run_mode_attaches_visible_tmux_agent(tmp_path: Path, monkeypat
     assert not FakeSettings.notification_block_file.exists()
 
 
+def test_run_defaults_to_telegram_tmux_mode(monkeypatch) -> None:
+    calls = {}
+
+    def fake_run_with_mode_prompt(**kwargs):
+        calls.update(kwargs)
+        return 0
+
+    monkeypatch.setattr("cli_courier.cli.run_with_mode_prompt", fake_run_with_mode_prompt)
+
+    result = cli_courier_cli.main(["run"])
+
+    assert result == 0
+    assert calls["mode"] == "telegram"
+    assert calls["agent_command"] == []
+
+
 def test_telegram_run_mode_without_agent_starts_bridge_only(tmp_path: Path, monkeypatch) -> None:
     calls = {}
 
@@ -117,6 +133,7 @@ def test_detached_run_mode_starts_tmux_without_attach(tmp_path: Path, monkeypatc
         default_agent_command = "codex"
 
     monkeypatch.setattr("cli_courier.cli.load_settings", lambda _config_path: FakeSettings())
+    monkeypatch.setattr("cli_courier.cli.wait_for_tmux_session", lambda _session: True)
 
     def fake_start_daemon(**kwargs):
         calls["start"] = kwargs
