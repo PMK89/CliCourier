@@ -1416,14 +1416,14 @@ async def test_restart_bridge_command_launches_detached_cli_restart(
 
     await bot._handle_command(parse_command("/restart"), message, FakeContext())
 
-    assert calls["command"][-3:] == ["restart", "--detach", "--open-terminal"]
+    assert calls["command"][-2:] == ["restart", "--detach"]
     assert calls["kwargs"]["cwd"] == str(tmp_path)
     assert calls["kwargs"]["env"]["DEFAULT_TELEGRAM_CHAT_ID"] == "100"
     assert calls["kwargs"]["env"]["DEFAULT_AGENT_ADAPTER"] == "codex"
     assert calls["kwargs"]["start_new_session"] is True
     assert message.replies == [
         "Restarting CliCourier resuming Codex CLI. The bot will reconnect shortly.\n"
-        "Opening local terminal for: tmux attach -t clicourier"
+        "Agent terminal: tmux attach -t clicourier"
     ]
 
 
@@ -1449,7 +1449,7 @@ async def test_restart_bridge_command_can_disable_resume(tmp_path: Path, monkeyp
 
     await bot._handle_command(parse_command("/restart --no-resume"), FakeMessage(), FakeContext())
 
-    assert calls["command"][-4:] == ["restart", "--detach", "--open-terminal", "--no-resume"]
+    assert calls["command"][-3:] == ["restart", "--detach", "--no-resume"]
 
 
 async def test_restart_bridge_preserves_active_agent_command(tmp_path: Path, monkeypatch) -> None:

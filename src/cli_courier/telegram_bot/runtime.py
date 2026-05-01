@@ -524,7 +524,7 @@ class TelegramBridgeBot:
         session_name = self.settings.agent_tmux_session or "clicourier"
         await message.reply_text(
             f"Restarting CliCourier {suffix}. The bot will reconnect shortly.\n"
-            f"Opening local terminal for: tmux attach -t {session_name}"
+            f"Agent terminal: tmux attach -t {session_name}"
         )
 
     async def _cmd_update(self, args: str, message, context) -> None:
@@ -2299,7 +2299,7 @@ def approval_decision_from_reactions(reactions) -> ApprovalDecision | None:
 
 
 def _bridge_restart_command(*, no_resume: bool = False) -> list[str]:
-    command = [sys.executable, "-m", "cli_courier.cli", "restart", "--detach", "--open-terminal"]
+    command = [sys.executable, "-m", "cli_courier.cli", "restart", "--detach"]
     if no_resume:
         command.append("--no-resume")
     return command
