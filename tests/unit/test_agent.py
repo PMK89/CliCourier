@@ -242,7 +242,7 @@ def test_tmux_process_waits_longer_before_submitting_large_text(tmp_path, monkey
     assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
 
 
-def test_default_agent_env_preserves_common_cli_auth(monkeypatch) -> None:
+def test_default_agent_env_preserves_config_but_not_provider_api_keys(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/claude")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-test")
@@ -252,12 +252,20 @@ def test_default_agent_env_preserves_common_cli_auth(monkeypatch) -> None:
 
     env = build_agent_env()
 
-    assert env["ANTHROPIC_API_KEY"] == "anthropic-test"
     assert env["CLAUDE_CONFIG_DIR"] == "/tmp/claude"
-    assert env["OPENAI_API_KEY"] == "openai-test"
-    assert env["GEMINI_API_KEY"] == "gemini-test"
     assert env["XDG_CONFIG_HOME"] == "/tmp/config"
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert "GEMINI_API_KEY" not in env
     assert "UNRELATED_SECRET" not in env
+
+
+def test_agent_env_allowlist_can_forward_provider_api_keys(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+
+    env = build_agent_env(("ANTHROPIC_API_KEY",))
+
+    assert env["ANTHROPIC_API_KEY"] == "anthropic-test"
 
 
 def test_tmux_shell_command_keeps_pane_open_after_agent_exit(tmp_path) -> None:

@@ -146,8 +146,9 @@ NOTIFICATION_BLOCK_FILE=muted
 MAX_TELEGRAM_CHUNK_CHARS=3500
 ```
 
-`AGENT_ENV_ALLOWLIST` is only needed for environment variables the child CLI agent must
-see. Bridge secrets are not forwarded by default.
+`AGENT_ENV_ALLOWLIST` is only needed for extra environment variables the child CLI agent
+must see. Provider API keys are not forwarded by default because they can override local
+CLI login credentials; add a key here only if you intentionally use API-key auth.
 
 `DEFAULT_TELEGRAM_CHAT_ID` is only for proactive background output, such as auto-start
 messages before you send a command. The bot can only message a private chat after you have
@@ -244,10 +245,9 @@ Code, and Gemini CLI. `clicourier restart` and Telegram `/restart` resume the mo
 session by default; pass `--no-resume` for a fresh session. Local `clicourier restart`
 starts the agent in a fresh tmux session and attaches when run from an interactive
 terminal; use `--detach` to restart without attaching. Telegram `/restart` preserves the
-active agent command, resumes that tool's latest session, opens a local terminal attached
-to tmux when a desktop terminal is available, and replies with the manual `tmux attach`
-command as fallback. Telegram `/resume` restarts the configured agent directly in resume
-mode.
+active agent command, resumes that tool's latest session, and replies with the manual
+`tmux attach` command. Telegram `/resume` restarts the configured agent directly in
+resume mode.
 When you force `AGENT_TERMINAL_BACKEND=tmux` or `pty`, CliCourier falls back to terminal
 capture for local/TUI workflows.
 
