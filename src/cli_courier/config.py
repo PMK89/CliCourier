@@ -313,3 +313,25 @@ def load_settings(config_path: Path | None = None) -> Settings:
         if cwd_env.exists():
             env_files.append(cwd_env)
     return Settings(_env_file=tuple(env_files) if env_files else None)
+
+
+def settings_summary_lines(settings: Settings, *, config_path: Path) -> list[str]:
+    path = config_path.expanduser()
+    return [
+        f"path: {path}",
+        f"exists: {'yes' if path.exists() else 'no'}",
+        "valid: yes",
+        (
+            "telegram_token: present"
+            if settings.telegram_bot_token.get_secret_value()
+            else "telegram_token: missing"
+        ),
+        "allowed_users: " + ",".join(str(user_id) for user_id in settings.allowed_telegram_user_ids),
+        f"workspace_root: {settings.workspace_root}",
+        f"default_agent_command: {settings.default_agent_command}",
+        f"agent_terminal_backend: {settings.agent_terminal_backend.value}",
+        f"agent_resume_last: {settings.agent_resume_last}",
+        f"agent_tmux_session: {settings.agent_tmux_session or 'clicourier'}",
+        f"whisper_backend: {settings.whisper_backend.value}",
+        f"whisper_model: {settings.whisper_model}",
+    ]

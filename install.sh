@@ -92,8 +92,15 @@ fi
 
 info ""
 info "CliCourier installed."
-info "Next steps:"
-info "  clicourier init"
-info "  clicourier doctor"
-info "  clicourier model download"
-info "  clicourier run"
+if [ -f "$HOME/.config/clicourier/config.env" ]; then
+  info "Existing config detected: $HOME/.config/clicourier/config.env"
+  info "Next steps:"
+  info "  clicourier doctor"
+  info "  clicourier run"
+else
+  info "Next steps:"
+  info "  clicourier init"
+  info "  clicourier doctor"
+  info "  clicourier model download"
+  info "  clicourier run"
+fi

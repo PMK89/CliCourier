@@ -12,6 +12,7 @@ from cli_courier.config import (
     TranscriptionBackend,
     WhisperBackend,
     load_settings,
+    settings_summary_lines,
 )
 from cli_courier.local_config import write_env_file
 
@@ -121,6 +122,22 @@ def test_load_settings_reads_local_config_file(tmp_path: Path) -> None:
     assert settings.allowed_telegram_user_ids == (42,)
     assert settings.default_agent_command == "gemini"
     assert settings.whisper_model == "base"
+
+
+def test_settings_summary_includes_allowed_users(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.env"
+    config_path.write_text("configured\n", encoding="utf-8")
+    settings = make_settings(tmp_path, ALLOWED_TELEGRAM_USER_IDS="42")
+
+    lines = settings_summary_lines(settings, config_path=config_path)
+
+    assert lines[:5] == [
+        f"path: {config_path}",
+        "exists: yes",
+        "valid: yes",
+        "telegram_token: present",
+        "allowed_users: 42",
+    ]
 
 
 def test_relative_workspace_root_resolves_from_start_directory(

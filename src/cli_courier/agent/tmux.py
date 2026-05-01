@@ -11,6 +11,8 @@ from typing import Iterable
 
 
 _SESSION_SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+_SEND_TEXT_CHUNK_CHARS = 700
+_LONG_TEXT_DOUBLE_SUBMIT_CHARS = 1000
 
 
 def tmux_available() -> bool:
@@ -136,15 +138,22 @@ class TmuxAgentProcess:
             # queue, guaranteeing Enter is processed after the text. paste-buffer -p
             # (bracketed paste) uses a separate path that can cause Enter to be dropped
             # by Ink/React TUIs (like Claude Code) that buffer input during paste sequences.
-            subprocess.run(
-                ["tmux", "send-keys", "-t", self.target, "-l", normalized],
-                check=True,
-            )
+            chunks = list(_text_chunks(normalized, _SEND_TEXT_CHUNK_CHARS))
+            for index, chunk in enumerate(chunks):
+                subprocess.run(
+                    ["tmux", "send-keys", "-t", self.target, "-l", chunk],
+                    check=True,
+                )
+                if index < len(chunks) - 1:
+                    time.sleep(0.08)
             delay = self._submit_delay_for_text(normalized)
             if delay > 0:
                 time.sleep(delay)
         key = submit_sequence if submit_sequence and len(submit_sequence) > 1 else "Enter"
         subprocess.run(["tmux", "send-keys", "-t", self.target, key], check=True)
+        if len(normalized) >= _LONG_TEXT_DOUBLE_SUBMIT_CHARS and key in {"Enter", "C-m"}:
+            time.sleep(0.35)
+            subprocess.run(["tmux", "send-keys", "-t", self.target, key], check=True)
 
     def _submit_delay_for_text(self, text: str) -> float:
         if not text:
@@ -203,3 +212,8 @@ class TmuxAgentProcess:
 
 def _shell_assignment(key: str, value: str) -> str:
     return f"{key}={shlex.quote(value)}"
+
+
+def _text_chunks(text: str, size: int) -> Iterable[str]:
+    for start in range(0, len(text), size):
+        yield text[start : start + size]

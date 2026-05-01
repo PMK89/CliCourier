@@ -228,7 +228,16 @@ def test_tmux_process_waits_longer_before_submitting_large_text(tmp_path, monkey
 
     process._send_text_with_submit("x" * 4000, "\r")
 
-    assert sleeps == [1.15]
+    assert sleeps == [0.08, 0.08, 0.08, 0.08, 0.08, 1.15, 0.35]
+    assert [call[:4] for call in calls[:6]] == [
+        ["tmux", "send-keys", "-t", "clicourier:0.0"],
+        ["tmux", "send-keys", "-t", "clicourier:0.0"],
+        ["tmux", "send-keys", "-t", "clicourier:0.0"],
+        ["tmux", "send-keys", "-t", "clicourier:0.0"],
+        ["tmux", "send-keys", "-t", "clicourier:0.0"],
+        ["tmux", "send-keys", "-t", "clicourier:0.0"],
+    ]
+    assert calls[-2] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
     assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
 
 
