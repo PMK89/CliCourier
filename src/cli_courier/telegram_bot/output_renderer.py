@@ -106,6 +106,7 @@ class TelegramEditableOutputMessage:
         *,
         running: bool,
         force: bool = False,
+        disable_notification: bool = False,
     ) -> bool:
         if not lines:
             return False
@@ -137,10 +138,22 @@ class TelegramEditableOutputMessage:
                 )
                 return False
             if self.message_id is None:
-                return await self._send(bot, lines, running=running)
+                return await self._send(
+                    bot,
+                    lines,
+                    running=running,
+                    disable_notification=disable_notification,
+                )
             return await self._edit(bot, lines, running=running)
 
-    async def _send(self, bot, lines: Sequence[str], *, running: bool) -> bool:
+    async def _send(
+        self,
+        bot,
+        lines: Sequence[str],
+        *,
+        running: bool,
+        disable_notification: bool,
+    ) -> bool:
         limit = self.safe_char_limit
         last_error: Exception | None = None
         for attempt in range(1, 4):
@@ -156,6 +169,7 @@ class TelegramEditableOutputMessage:
                     chat_id=self.chat_id,
                     text=text,
                     parse_mode=TELEGRAM_CLI_PARSE_MODE,
+                    disable_notification=disable_notification,
                 )
                 message_id = getattr(sent, "message_id", None)
                 if message_id is None:
@@ -317,10 +331,23 @@ class StreamingMessageRenderer:
             return self.buffer.latest_lines_with_partial()
         return self.buffer.latest_lines()
 
-    async def render(self, bot, *, running: bool, force: bool = False) -> bool:
+    async def render(
+        self,
+        bot,
+        *,
+        running: bool,
+        force: bool = False,
+        disable_notification: bool = False,
+    ) -> bool:
         if running and self.finished:
             return False
-        rendered = await self.message.render(bot, self.latest_lines(), running=running, force=force)
+        rendered = await self.message.render(
+            bot,
+            self.latest_lines(),
+            running=running,
+            force=force,
+            disable_notification=disable_notification,
+        )
         if not running:
             self.finished = True
         return rendered

@@ -116,7 +116,19 @@ async def test_first_render_sends_message_once() -> None:
     assert len(bot.send_calls) == 1
     assert bot.send_calls[0][1] == 100
     assert bot.send_kwargs[0]["parse_mode"] == TELEGRAM_CLI_PARSE_MODE
+    assert bot.send_kwargs[0]["disable_notification"] is False
     assert renderer.message_id == 1
+
+
+async def test_first_render_can_be_sent_without_notification() -> None:
+    bot = FakeTelegramBot()
+    renderer = StreamingMessageRenderer(chat_id=100, min_edit_interval_seconds=0)
+    renderer.append_chunk("LINE 001\n")
+
+    await renderer.render(bot, running=True, disable_notification=True)
+
+    assert len(bot.send_calls) == 1
+    assert bot.send_kwargs[0]["disable_notification"] is True
 
 
 async def test_subsequent_renders_edit_same_message_id() -> None:
