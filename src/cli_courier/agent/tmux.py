@@ -127,9 +127,14 @@ class TmuxAgentProcess:
     def _shell_command(self) -> str:
         assignments = " ".join(_shell_assignment(key, value) for key, value in self.env.items())
         command = shlex.join(self.command)
+        keep_open = (
+            "status=$?; "
+            "printf '\\n[CliCourier] agent exited with status %s\\n' \"$status\"; "
+            "exec \"${SHELL:-/bin/sh}\""
+        )
         if assignments:
-            return f"env -i {assignments} {command}"
-        return command
+            return f"env -i {assignments} {command}; {keep_open}"
+        return f"{command}; {keep_open}"
 
     def _send_text_with_submit(self, text: str, submit_sequence: str) -> None:
         normalized = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").splitlines())

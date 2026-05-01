@@ -9,6 +9,7 @@ from cli_courier.agent.claude_jsonl import parse_claude_jsonl_line
 from cli_courier.agent.codex_jsonl import parse_codex_jsonl_line, parse_codex_jsonl_lines
 from cli_courier.agent.events import AgentEvent, AgentEventKind
 from cli_courier.agent.output_filter import agent_output_in_progress, prepare_agent_output
+from cli_courier.agent.pty import build_agent_env
 from cli_courier.agent.session import AgentSession, resolve_agent_backend, resolve_terminal_backend
 from cli_courier.agent.structured import _select_final_message_text
 from cli_courier.agent.tmux import TmuxAgentProcess, safe_tmux_session_name
@@ -239,6 +240,40 @@ def test_tmux_process_waits_longer_before_submitting_large_text(tmp_path, monkey
     ]
     assert calls[-2] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
     assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
+
+
+def test_default_agent_env_preserves_common_cli_auth(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/claude")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test")
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
+    monkeypatch.setenv("XDG_CONFIG_HOME", "/tmp/config")
+    monkeypatch.setenv("UNRELATED_SECRET", "do-not-forward")
+
+    env = build_agent_env()
+
+    assert env["ANTHROPIC_API_KEY"] == "anthropic-test"
+    assert env["CLAUDE_CONFIG_DIR"] == "/tmp/claude"
+    assert env["OPENAI_API_KEY"] == "openai-test"
+    assert env["GEMINI_API_KEY"] == "gemini-test"
+    assert env["XDG_CONFIG_HOME"] == "/tmp/config"
+    assert "UNRELATED_SECRET" not in env
+
+
+def test_tmux_shell_command_keeps_pane_open_after_agent_exit(tmp_path) -> None:
+    process = TmuxAgentProcess(
+        ["claude"],
+        cwd=tmp_path,
+        env={"HOME": "/root", "PATH": "/usr/bin", "SHELL": "/bin/bash"},
+        session_name="clicourier",
+    )
+
+    command = process._shell_command()
+
+    assert command.startswith("env -i ")
+    assert " claude; status=$?; " in command
+    assert "[CliCourier] agent exited with status %s" in command
+    assert 'exec "${SHELL:-/bin/sh}"' in command
 
 
 async def test_tmux_start_replaces_existing_dead_session(tmp_path, monkeypatch) -> None:
