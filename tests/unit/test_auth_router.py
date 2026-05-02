@@ -32,6 +32,7 @@ from cli_courier.telegram_bot.runtime import (
     looks_like_screenshot_summary,
     normalize_echo_text,
 )
+from cli_courier.telegram_bot.output_renderer import telegram_text_size
 from cli_courier.voice import DisabledTranscriber
 
 
@@ -595,6 +596,17 @@ class FakeFileContext:
         self.bot = FakeFileBot(content)
 
 
+class LengthRejectBot(FakeBot):
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self.limit = limit
+
+    async def send_message(self, *, chat_id: int, text: str, **kwargs):
+        if telegram_text_size(text) > self.limit:
+            raise RuntimeError("Bad Request: message is too long")
+        return await super().send_message(chat_id=chat_id, text=text, **kwargs)
+
+
 class FakeAudioAttachment:
     file_id = "file-1"
     file_unique_id = "unique-1"
@@ -689,6 +701,48 @@ async def test_muted_telegram_request_still_delivers_final_output(tmp_path: Path
     await bridge._send_agent_output(bot_api, 100, "Done.", complete_request=True)
 
     assert non_dashboard_messages(bot_api.messages) == ["Done."]
+
+
+async def test_safe_send_message_chunks_message_too_long_errors(tmp_path: Path) -> None:
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path, MAX_TELEGRAM_CHUNK_CHARS="200"),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bot_api = LengthRejectBot(limit=200)
+
+    sent = await bridge._safe_send_message(bot_api, chat_id=100, text="╭" * 250)
+
+    assert sent is not None
+    assert len(bot_api.messages) > 1
+    assert all(telegram_text_size(message) <= 200 for message in bot_api.messages)
+
+
+async def test_reply_code_chunks_escaped_text_by_telegram_size(tmp_path: Path) -> None:
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path, MAX_TELEGRAM_CHUNK_CHARS="200"),
+        state=RuntimeState.create(tmp_path),
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    message = FakeMessage()
+
+    await bridge._reply_code(message, "<" * 250)
+
+    assert len(message.replies) > 1
+    assert all(reply.startswith("<pre>") for reply in message.replies)
+    assert all(telegram_text_size(reply) <= 200 for reply in message.replies)
 
 
 async def test_muted_interactive_turn_still_sends_done_notification(tmp_path: Path) -> None:

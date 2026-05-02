@@ -274,7 +274,7 @@ class TelegramEditableOutputMessage:
             )
             await self._sleep(retry_after)
             return limit
-        if _is_message_too_long(exc) and limit > 500:
+        if is_message_too_long_error(exc) and limit > 500:
             next_limit = max(500, min(limit - 500, int(limit * 0.8)))
             self._log(
                 f"{action}_shrink_retry",
@@ -371,7 +371,7 @@ def render_output_window(
     kept = list(visible_lines)
     while kept:
         text = _compose(header, kept)
-        if len(text) <= limit:
+        if telegram_text_size(text) <= limit:
             return text
         if len(kept) == 1:
             return _compose(header, [_trim_single_line_to_fit(header, kept[0], limit)])
@@ -391,7 +391,7 @@ def _compose(header: str, lines: Sequence[str]) -> str:
 
 
 def _trim_single_line_to_fit(header: str, line: str, limit: int) -> str:
-    if len(_compose(header, [""])) > limit:
+    if telegram_text_size(_compose(header, [""])) > limit:
         return ""
     low = 0
     high = len(line)
@@ -399,7 +399,7 @@ def _trim_single_line_to_fit(header: str, line: str, limit: int) -> str:
     while low <= high:
         size = (low + high) // 2
         candidate = line[-size:] if size else ""
-        if len(_compose(header, [candidate])) <= limit:
+        if telegram_text_size(_compose(header, [candidate])) <= limit:
             best = candidate
             low = size + 1
         else:
@@ -418,7 +418,11 @@ def _is_message_not_modified(exc: Exception) -> bool:
     return "message is not modified" in text or "message not modified" in text
 
 
-def _is_message_too_long(exc: Exception) -> bool:
+def telegram_text_size(text: str) -> int:
+    return max(len(text), len(text.encode("utf-8")))
+
+
+def is_message_too_long_error(exc: Exception) -> bool:
     text = str(exc).lower()
     return (
         "message is too long" in text

@@ -45,6 +45,8 @@ from cli_courier.telegram_bot.dashboard import DashboardSnapshot, render_dashboa
 from cli_courier.telegram_bot.output_renderer import (
     StreamingMessageRenderer,
     TELEGRAM_SAFE_LIMIT,
+    is_message_too_long_error,
+    telegram_text_size,
 )
 from cli_courier.telegram_bot.router import RouteKind, route_text
 from cli_courier.chat_history import ChatHistory
@@ -1930,8 +1932,8 @@ class TelegramBridgeBot:
         text = text.strip()
         if not text:
             return
-        char_limit = max(200, min(self.settings.max_telegram_chunk_chars, TELEGRAM_SAFE_LIMIT) - 13)
-        for chunk in chunk_text(text, char_limit):
+        limit = max(200, min(self.settings.max_telegram_chunk_chars, TELEGRAM_SAFE_LIMIT))
+        for chunk in _html_pre_chunks(text, limit):
             escaped = html.escape(chunk, quote=False)
             await message.reply_text(f"<pre>{escaped}</pre>", parse_mode="HTML")
 
@@ -2197,8 +2199,26 @@ class TelegramBridgeBot:
         try:
             return await bot.send_message(**kwargs)
         except Exception as exc:  # noqa: BLE001 - Telegram errors should not crash the bridge
+            if is_message_too_long_error(exc) and isinstance(kwargs.get("text"), str):
+                return await self._safe_send_message_chunks(bot, **kwargs)
             print(f"telegram send failed: {exc}", flush=True)
             return None
+
+    async def _safe_send_message_chunks(self, bot, **kwargs):
+        text = kwargs.pop("text")
+        limit = max(200, min(self.settings.max_telegram_chunk_chars, TELEGRAM_SAFE_LIMIT))
+        chunks = list(_telegram_plain_chunks(text, limit))
+        sent = None
+        for index, chunk in enumerate(chunks):
+            chunk_kwargs = dict(kwargs)
+            if index > 0:
+                chunk_kwargs.pop("reply_markup", None)
+            try:
+                sent = await bot.send_message(text=chunk, **chunk_kwargs)
+            except Exception as exc:  # noqa: BLE001 - Telegram errors should not crash the bridge
+                print(f"telegram send chunk failed: {exc}", flush=True)
+                return sent
+        return sent
 
     async def _safe_send_chat_action(self, bot, **kwargs) -> bool:
         try:
@@ -2670,6 +2690,41 @@ def _write_temp_log(text: str) -> Path:
 def _is_telegram_message_not_modified(exc: Exception) -> bool:
     text = str(exc).lower()
     return "message is not modified" in text or "message not modified" in text
+
+
+def _telegram_plain_chunks(text: str, limit: int) -> list[str]:
+    chunks: list[str] = []
+    current: list[str] = []
+    current_size = 0
+    for char in text:
+        char_size = telegram_text_size(char)
+        if current and current_size + char_size > limit:
+            chunks.append("".join(current))
+            current = []
+            current_size = 0
+        current.append(char)
+        current_size += char_size
+    if current:
+        chunks.append("".join(current))
+    return chunks or [""]
+
+
+def _html_pre_chunks(text: str, limit: int) -> list[str]:
+    wrapper_size = telegram_text_size("<pre></pre>")
+    chunks: list[str] = []
+    current: list[str] = []
+    current_size = wrapper_size
+    for char in text:
+        char_size = telegram_text_size(html.escape(char, quote=False))
+        if current and current_size + char_size > limit:
+            chunks.append("".join(current))
+            current = []
+            current_size = wrapper_size
+        current.append(char)
+        current_size += char_size
+    if current:
+        chunks.append("".join(current))
+    return chunks
 
 
 def build_transcriber(settings: Settings) -> Transcriber:

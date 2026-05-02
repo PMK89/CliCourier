@@ -13,6 +13,9 @@ from typing import Iterable
 _SESSION_SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _SEND_TEXT_CHUNK_CHARS = 700
 _LONG_TEXT_DOUBLE_SUBMIT_CHARS = 1000
+_AGENT_STATE_OPTION = "@clicourier_agent_state"
+_AGENT_STATE_RUNNING = "running"
+_AGENT_STATE_EXITED = "exited"
 
 
 def tmux_available() -> bool:
@@ -60,17 +63,18 @@ class TmuxAgentProcess:
 
     @property
     def is_running(self) -> bool:
-        return self._has_live_pane()
+        return tmux_session_has_running_agent(self.session_name)
 
     async def start(self) -> None:
         if not tmux_available():
             raise RuntimeError("tmux is required for AGENT_TERMINAL_BACKEND=tmux")
         session_exists = self._has_session()
-        if session_exists and not self._has_live_pane():
+        if session_exists and not tmux_session_has_running_agent(self.session_name):
             await asyncio.to_thread(self._kill_session)
             session_exists = False
         if not session_exists:
             await asyncio.to_thread(self._new_session)
+            await asyncio.to_thread(self._wait_for_agent_state)
             self._created_session = True
         self._reader_task = asyncio.create_task(self._read_loop())
 
@@ -129,12 +133,14 @@ class TmuxAgentProcess:
         command = shlex.join(self.command)
         keep_open = (
             "status=$?; "
+            f"{_tmux_set_agent_state_command(self.session_name, _AGENT_STATE_EXITED)}; "
             "printf '\\n[CliCourier] agent exited with status %s\\n' \"$status\"; "
             "exec \"${SHELL:-/bin/sh}\""
         )
+        mark_running = _tmux_set_agent_state_command(self.session_name, _AGENT_STATE_RUNNING)
         if assignments:
-            return f"env -i {assignments} {command}; {keep_open}"
-        return f"{command}; {keep_open}"
+            return f"{mark_running}; env -i {assignments} {command}; {keep_open}"
+        return f"{mark_running}; {command}; {keep_open}"
 
     def _send_text_with_submit(self, text: str, submit_sequence: str) -> None:
         normalized = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").splitlines())
@@ -167,12 +173,21 @@ class TmuxAgentProcess:
         return max(self.submit_delay_seconds, scaled_delay)
 
     async def _read_loop(self) -> None:
-        while self._has_live_pane():
+        while self.is_running:
             snapshot = await asyncio.to_thread(self._capture_snapshot)
             if snapshot and snapshot != self._last_snapshot:
                 await self.output_queue.put(snapshot)
                 self._last_snapshot = snapshot
             await asyncio.sleep(self.poll_interval_seconds)
+
+    def _wait_for_agent_state(self) -> None:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if _tmux_agent_state(self.session_name) in {_AGENT_STATE_RUNNING, _AGENT_STATE_EXITED}:
+                return
+            if not self._has_live_pane():
+                return
+            time.sleep(0.05)
 
     def _capture_snapshot(self) -> str:
         result = subprocess.run(
@@ -222,3 +237,41 @@ def _shell_assignment(key: str, value: str) -> str:
 def _text_chunks(text: str, size: int) -> Iterable[str]:
     for start in range(0, len(text), size):
         yield text[start : start + size]
+
+
+def tmux_session_has_running_agent(session_name: str) -> bool:
+    return _tmux_has_live_pane(session_name) and _tmux_agent_state(session_name) == _AGENT_STATE_RUNNING
+
+
+def _tmux_has_live_pane(session_name: str) -> bool:
+    result = subprocess.run(
+        ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_dead}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    return any(line.strip() == "0" for line in result.stdout.splitlines())
+
+
+def _tmux_agent_state(session_name: str) -> str:
+    result = subprocess.run(
+        ["tmux", "show-options", "-qv", "-t", session_name, _AGENT_STATE_OPTION],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _tmux_set_agent_state_command(session_name: str, state: str) -> str:
+    return (
+        "tmux set-option -q -t "
+        f"{shlex.quote(session_name)} {_AGENT_STATE_OPTION} {shlex.quote(state)} "
+        ">/dev/null 2>&1 || true"
+    )

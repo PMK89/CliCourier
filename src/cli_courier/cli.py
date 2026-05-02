@@ -356,6 +356,7 @@ def run_with_mode_prompt(
         extra_env=extra_env,
         auto_start_agent=should_start_agent,
         resume_agent=False,
+        required_agent_tmux_session=extra_env["AGENT_TMUX_SESSION"] if should_start_agent else None,
     )
     if not status.running:
         print("failed to start clicourier", file=sys.stderr)

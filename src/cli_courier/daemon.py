@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from cli_courier.agent.tmux import tmux_session_has_running_agent
 from cli_courier.local_config import default_log_path, default_pid_path, ensure_private_parent
 
 
@@ -65,12 +66,18 @@ def start_daemon(
     extra_env: dict[str, str] | None = None,
     auto_start_agent: bool = True,
     resume_agent: bool = False,
+    required_agent_tmux_session: str | None = None,
     pid_path: Path = default_pid_path(),
     log_path: Path = default_log_path(),
 ) -> DaemonStatus:
     status = daemon_status(pid_path=pid_path, log_path=log_path)
     if status.running:
-        return status
+        if required_agent_tmux_session and not tmux_session_has_running_agent(required_agent_tmux_session):
+            status = stop_daemon(pid_path=pid_path, log_path=log_path)
+            if status.running:
+                return status
+        else:
+            return status
 
     ensure_private_parent(pid_path)
     ensure_private_parent(log_path)

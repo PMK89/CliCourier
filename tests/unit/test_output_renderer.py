@@ -7,6 +7,7 @@ from cli_courier.telegram_bot.output_renderer import (
     TELEGRAM_CLI_PARSE_MODE,
     StreamingMessageRenderer,
     render_output_window,
+    telegram_text_size,
 )
 
 
@@ -72,6 +73,12 @@ def test_long_lines_fit_under_telegram_safe_limit() -> None:
 
     assert len(text) <= 3900
     assert output_lines(text)[-1].startswith("LINE 060")
+
+
+def test_unicode_terminal_output_fits_under_telegram_safe_limit() -> None:
+    text = render_output_window(["╭" * 2500], running=True, limit=3900)
+
+    assert telegram_text_size(text) <= 3900
 
 
 def test_render_uses_preformatted_html_for_cli_output() -> None:
