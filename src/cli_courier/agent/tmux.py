@@ -16,6 +16,7 @@ _LONG_TEXT_DOUBLE_SUBMIT_CHARS = 1000
 _AGENT_STATE_OPTION = "@clicourier_agent_state"
 _AGENT_STATE_RUNNING = "running"
 _AGENT_STATE_EXITED = "exited"
+_SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 
 
 def tmux_available() -> bool:
@@ -183,7 +184,10 @@ class TmuxAgentProcess:
     def _wait_for_agent_state(self) -> None:
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
-            if _tmux_agent_state(self.session_name) in {_AGENT_STATE_RUNNING, _AGENT_STATE_EXITED}:
+            state = _tmux_agent_state(self.session_name)
+            if state == _AGENT_STATE_EXITED:
+                return
+            if state == _AGENT_STATE_RUNNING and not _tmux_pane_is_idle_shell(self.session_name):
                 return
             if not self._has_live_pane():
                 return
@@ -240,7 +244,11 @@ def _text_chunks(text: str, size: int) -> Iterable[str]:
 
 
 def tmux_session_has_running_agent(session_name: str) -> bool:
-    return _tmux_has_live_pane(session_name) and _tmux_agent_state(session_name) == _AGENT_STATE_RUNNING
+    return (
+        _tmux_has_live_pane(session_name)
+        and _tmux_agent_state(session_name) == _AGENT_STATE_RUNNING
+        and not _tmux_pane_is_idle_shell(session_name)
+    )
 
 
 def _tmux_has_live_pane(session_name: str) -> bool:
@@ -267,6 +275,48 @@ def _tmux_agent_state(session_name: str) -> str:
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
+
+
+def _tmux_pane_is_idle_shell(session_name: str) -> bool:
+    result = subprocess.run(
+        [
+            "tmux",
+            "display-message",
+            "-p",
+            "-t",
+            f"{session_name}:0.0",
+            "#{pane_current_command}\t#{pane_pid}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    command, _, pid = result.stdout.strip().partition("\t")
+    if Path(command).name not in _SHELL_COMMANDS:
+        return False
+    return not _process_has_child(pid)
+
+
+def _process_has_child(pid: str) -> bool:
+    if not pid.isdigit():
+        return False
+    result = subprocess.run(
+        ["ps", "-eo", "ppid=,pid="],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == pid:
+            return True
+    return False
 
 
 def _tmux_set_agent_state_command(session_name: str, state: str) -> str:

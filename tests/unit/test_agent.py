@@ -224,6 +224,56 @@ def test_tmux_process_does_not_treat_unmanaged_live_shell_as_running(tmp_path, m
     assert process.is_running is False
 
 
+def test_tmux_process_does_not_treat_stuck_running_shell_as_running(tmp_path, monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        if command[:3] == ["tmux", "list-panes", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "0\n"})()
+        if command[:4] == ["tmux", "show-options", "-qv", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "running\n"})()
+        if command[:4] == ["tmux", "display-message", "-p", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "bash\n"})()
+        raise AssertionError(command)
+
+    monkeypatch.setattr("cli_courier.agent.tmux.subprocess.run", fake_run)
+    process = TmuxAgentProcess(["sh"], cwd=tmp_path, session_name="clicourier")
+
+    assert process.is_running is False
+
+
+def test_tmux_process_treats_running_agent_pane_as_running(tmp_path, monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        if command[:3] == ["tmux", "list-panes", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "0\n"})()
+        if command[:4] == ["tmux", "show-options", "-qv", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "running\n"})()
+        if command[:4] == ["tmux", "display-message", "-p", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "claude\n"})()
+        raise AssertionError(command)
+
+    monkeypatch.setattr("cli_courier.agent.tmux.subprocess.run", fake_run)
+    process = TmuxAgentProcess(["sh"], cwd=tmp_path, session_name="clicourier")
+
+    assert process.is_running is True
+
+
+def test_tmux_process_treats_shell_with_child_as_running(tmp_path, monkeypatch) -> None:
+    def fake_run(command, **kwargs):
+        if command[:3] == ["tmux", "list-panes", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "0\n"})()
+        if command[:4] == ["tmux", "show-options", "-qv", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "running\n"})()
+        if command[:4] == ["tmux", "display-message", "-p", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "bash\t123\n"})()
+        if command[:3] == ["ps", "-eo", "ppid=,pid="]:
+            return type("Result", (), {"returncode": 0, "stdout": "123 456\n"})()
+        raise AssertionError(command)
+
+    monkeypatch.setattr("cli_courier.agent.tmux.subprocess.run", fake_run)
+    process = TmuxAgentProcess(["sh"], cwd=tmp_path, session_name="clicourier")
+
+    assert process.is_running is True
+
+
 def test_tmux_process_waits_longer_before_submitting_large_text(tmp_path, monkeypatch) -> None:
     calls: list[list[str]] = []
     sleeps: list[float] = []
@@ -316,6 +366,8 @@ async def test_tmux_start_replaces_existing_dead_session(tmp_path, monkeypatch) 
             return type("Result", (), {"returncode": 0 if has_session else 1, "stdout": stdout})()
         if command[:4] == ["tmux", "show-options", "-qv", "-t"]:
             return type("Result", (), {"returncode": 0 if agent_state else 1, "stdout": agent_state})()
+        if command[:4] == ["tmux", "display-message", "-p", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "claude\n"})()
         if command[:3] == ["tmux", "kill-session", "-t"]:
             has_session = False
             live_pane = False
@@ -362,6 +414,8 @@ async def test_tmux_start_replaces_existing_unmanaged_live_session(tmp_path, mon
             return type("Result", (), {"returncode": 0 if has_session else 1, "stdout": stdout})()
         if command[:4] == ["tmux", "show-options", "-qv", "-t"]:
             return type("Result", (), {"returncode": 0 if agent_state else 1, "stdout": agent_state})()
+        if command[:4] == ["tmux", "display-message", "-p", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "claude\n"})()
         if command[:3] == ["tmux", "kill-session", "-t"]:
             has_session = False
             live_pane = False
