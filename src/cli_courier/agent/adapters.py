@@ -29,6 +29,8 @@ class AgentAdapter(Protocol):
 
     def build_resume_command(self, command: list[str]) -> list[str]: ...
 
+    def strip_resume_command(self, command: list[str]) -> list[str]: ...
+
     def build_structured_turn_command(
         self,
         command: list[str],
@@ -80,6 +82,9 @@ class BaseAdapter:
 
     def build_resume_command(self, command: list[str]) -> list[str]:
         return command
+
+    def strip_resume_command(self, command: list[str]) -> list[str]:
+        return list(command)
 
     def build_structured_turn_command(
         self,
@@ -166,6 +171,13 @@ class CodexAdapter(BaseAdapter):
             return base if "--last" in base else [base[0], "resume", "--last", *base[2:]]
         return [base[0], "resume", "--last", *base[1:]]
 
+    def strip_resume_command(self, command: list[str]) -> list[str]:
+        if len(command) >= 2 and command[1] == "resume":
+            return [command[0], *(part for part in command[2:] if part != "--last")]
+        if len(command) >= 3 and command[1] == "exec" and command[2] == "resume":
+            return [command[0], "exec", *(part for part in command[3:] if part != "--last")]
+        return list(command)
+
     def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "Iterable[AgentEvent]":
         from cli_courier.agent.codex_jsonl import parse_codex_jsonl_line
 
@@ -234,6 +246,9 @@ class ClaudeAdapter(BaseAdapter):
             result.append("--continue")
         return result
 
+    def strip_resume_command(self, command: list[str]) -> list[str]:
+        return [part for part in command if part not in {"--continue", "-c"}]
+
     def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> "Iterable[AgentEvent]":
         from cli_courier.agent.claude_jsonl import parse_claude_jsonl_line
 
@@ -291,6 +306,22 @@ class GeminiAdapter(BaseAdapter):
         result = list(command)
         if "-r" not in result and "--resume" not in result:
             result.extend(["--resume", "latest"])
+        return result
+
+    def strip_resume_command(self, command: list[str]) -> list[str]:
+        result: list[str] = []
+        skip_next = False
+        for index, part in enumerate(command):
+            if skip_next:
+                skip_next = False
+                continue
+            if part.startswith("--resume="):
+                continue
+            if part in {"--resume", "-r"}:
+                if index + 1 < len(command) and not command[index + 1].startswith("-"):
+                    skip_next = True
+                continue
+            result.append(part)
         return result
 
     def parse_jsonl_line(self, line: str, *, session_id: str | None = None) -> Iterable["AgentEvent"]:

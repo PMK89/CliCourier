@@ -1544,7 +1544,7 @@ async def test_restart_bridge_preserves_active_agent_command(tmp_path: Path, mon
     state = RuntimeState.create(tmp_path)
     state.active_agent = SimpleNamespace(
         adapter=ClaudeAdapter(),
-        command=("claude", "--dangerously-skip-permissions"),
+        command=("claude", "--dangerously-skip-permissions", "--continue"),
     )
     bot = TelegramBridgeBot(
         settings=settings(tmp_path, DEFAULT_AGENT_ADAPTER="codex", DEFAULT_AGENT_COMMAND="codex"),
@@ -1571,6 +1571,38 @@ async def test_restart_bridge_preserves_active_agent_command(tmp_path: Path, mon
     assert env["DEFAULT_AGENT_ADAPTER"] == "claude"
     assert env["DEFAULT_AGENT_COMMAND"] == "claude --dangerously-skip-permissions"
     assert env["DEFAULT_TELEGRAM_CHAT_ID"] == "100"
+
+
+async def test_restart_bridge_prefers_active_agent_base_command(tmp_path: Path, monkeypatch) -> None:
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = SimpleNamespace(
+        adapter=ClaudeAdapter(),
+        base_command=("claude", "--dangerously-skip-permissions"),
+        command=("claude", "--dangerously-skip-permissions", "--continue"),
+    )
+    bot = TelegramBridgeBot(
+        settings=settings(tmp_path, DEFAULT_AGENT_ADAPTER="codex", DEFAULT_AGENT_COMMAND="codex"),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    calls = {}
+
+    class FakePopen:
+        def __init__(self, command, **kwargs) -> None:
+            calls["kwargs"] = kwargs
+
+    monkeypatch.setattr("cli_courier.telegram_bot.runtime.subprocess.Popen", FakePopen)
+
+    await bot._handle_command(parse_command("/restart"), FakeMessage(), FakeContext())
+
+    env = calls["kwargs"]["env"]
+    assert env["DEFAULT_AGENT_COMMAND"] == "claude --dangerously-skip-permissions"
 
 
 async def test_resume_command_starts_agent_with_required_resume(tmp_path: Path, monkeypatch) -> None:

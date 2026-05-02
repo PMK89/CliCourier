@@ -507,7 +507,12 @@ class TelegramBridgeBot:
             "DEFAULT_AGENT_ADAPTER": adapter_id,
             "DEFAULT_TELEGRAM_CHAT_ID": str(message.chat_id),
         }
-        active_command = tuple(getattr(active, "command", ()) or ()) if active is not None else ()
+        active_command = tuple(
+            getattr(active, "base_command", ()) or getattr(active, "command", ()) or ()
+        ) if active is not None else ()
+        strip_resume = getattr(getattr(active, "adapter", None), "strip_resume_command", None)
+        if callable(strip_resume):
+            active_command = tuple(strip_resume(list(active_command)))
         if active_command:
             restart_env["DEFAULT_AGENT_COMMAND"] = shlex.join(str(part) for part in active_command)
         command = _bridge_restart_command(no_resume=no_resume)

@@ -306,9 +306,10 @@ def test_tmux_process_waits_longer_before_submitting_large_text(tmp_path, monkey
     assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
 
 
-def test_default_agent_env_preserves_config_but_not_provider_api_keys(monkeypatch) -> None:
+def test_default_agent_env_preserves_cli_login_but_not_provider_api_keys(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/claude")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "claude-oauth-test")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-test")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-test")
     monkeypatch.setenv("XDG_CONFIG_HOME", "/tmp/config")
@@ -317,6 +318,7 @@ def test_default_agent_env_preserves_config_but_not_provider_api_keys(monkeypatc
     env = build_agent_env()
 
     assert env["CLAUDE_CONFIG_DIR"] == "/tmp/claude"
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "claude-oauth-test"
     assert env["XDG_CONFIG_HOME"] == "/tmp/config"
     assert "ANTHROPIC_API_KEY" not in env
     assert "OPENAI_API_KEY" not in env
@@ -924,6 +926,23 @@ def test_claude_adapter_does_not_duplicate_continue_flag() -> None:
     command = ClaudeAdapter().build_resume_command(["claude", "--continue"])
 
     assert command.count("--continue") == 1
+
+
+def test_adapters_strip_generated_resume_flags() -> None:
+    assert CodexAdapter().strip_resume_command(["codex", "resume", "--last", "--model", "gpt-5"]) == [
+        "codex",
+        "--model",
+        "gpt-5",
+    ]
+    assert ClaudeAdapter().strip_resume_command(["claude", "--model", "opus", "--continue"]) == [
+        "claude",
+        "--model",
+        "opus",
+    ]
+    assert GeminiAdapter().strip_resume_command(["gemini", "--resume", "latest", "--yolo"]) == [
+        "gemini",
+        "--yolo",
+    ]
 
 
 # Claude Code JSONL parser tests

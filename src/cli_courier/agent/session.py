@@ -50,6 +50,7 @@ class AgentSession:
         self.backend = backend
         self.replaces_output_snapshots = backend == "tmux"
         self.resume_last = resume_last and adapter.capabilities.supports_resume
+        self.base_command = tuple(command)
         command = adapter.build_resume_command(command) if self.resume_last and backend != "structured" else command
         self.command = command
         if backend == "tmux":
