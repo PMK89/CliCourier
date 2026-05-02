@@ -80,6 +80,13 @@ class TmuxAgentProcess:
             await asyncio.to_thread(self._new_session)
             await asyncio.to_thread(self._wait_for_agent_state)
             self._created_session = True
+            self.initial_snapshot: str | None = None
+        else:
+            # Reattaching to a running session: capture existing scrollback so
+            # the reader loop and AgentSession can skip it and only forward new output.
+            initial = await asyncio.to_thread(self._capture_snapshot)
+            self.initial_snapshot = initial
+            self._last_snapshot = initial
         self._reader_task = asyncio.create_task(self._read_loop())
 
     async def stop(self) -> None:

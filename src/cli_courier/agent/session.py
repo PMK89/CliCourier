@@ -88,6 +88,10 @@ class AgentSession:
 
     async def start(self) -> None:
         await self._process.start()
+        initial = getattr(self._process, "initial_snapshot", None)
+        if initial is not None and self.replaces_output_snapshots:
+            self._snapshot_baseline = initial
+            self._last_raw_snapshot = initial
         self._consumer_task = asyncio.create_task(self._consume_output())
 
     async def stop(self) -> None:
