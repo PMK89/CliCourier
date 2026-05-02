@@ -1332,9 +1332,27 @@ class TelegramBridgeBot:
         if session.backend == "structured":
             return
         recent_output = session.recent_output(4000)
-        if has_auto_approval_marker(recent_output):
-            self.state.clear_pending_actions(kind="approval", chat_id=chat_id)
-            self._last_approval_signature = None
+        # detect_pending_approval uses _after_last_auto_approval internally, so it
+        # ignores approval prompts that have already been auto-handled and avoids
+        # false positives from old auto-approval markers in the rolling buffer.
+        pending = detect_pending_approval(recent_output, session.adapter)
+        if pending is None:
+            print(
+                f"clicourier approval_scan chat_id={chat_id} detected=false"
+                f" tail_len={len(recent_output)} sig={self._last_approval_signature!r:.60}",
+                flush=True,
+            )
+            # No active approval prompt. If the agent's auto-reviewer handled it,
+            # delete the stale Telegram button so the user doesn't see an expired action.
+            current = self.state.active_pending_action("approval", chat_id=chat_id)
+            if current is not None and has_auto_approval_marker(recent_output):
+                if current.message_id is not None:
+                    try:
+                        await bot.delete_message(chat_id=chat_id, message_id=current.message_id)
+                    except Exception:  # noqa: BLE001 - best-effort cleanup
+                        pass
+                self.state.clear_pending_actions(kind="approval", chat_id=chat_id)
+                self._last_approval_signature = None
             return
         current = self.state.active_pending_action("approval", chat_id=chat_id)
         if current is not None:
@@ -1347,14 +1365,6 @@ class TelegramBridgeBot:
             )
             self.state.clear_pending_action(current.id)
             self._last_approval_signature = None
-        pending = detect_pending_approval(recent_output, session.adapter)
-        if pending is None:
-            print(
-                f"clicourier approval_scan chat_id={chat_id} detected=false"
-                f" tail_len={len(recent_output)} sig={self._last_approval_signature!r:.60}",
-                flush=True,
-            )
-            return
         if pending.prompt_excerpt == self._last_approval_signature:
             return
         print(
