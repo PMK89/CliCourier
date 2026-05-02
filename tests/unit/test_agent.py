@@ -340,9 +340,10 @@ def test_tmux_process_waits_for_visible_input_tail_before_submit(tmp_path, monke
 
 
 def test_default_agent_env_preserves_cli_login_but_not_provider_api_keys(monkeypatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "anthropic-auth-test")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://claude.example.test")
     monkeypatch.setenv("ANTHROPIC_CONFIG_DIR", "/tmp/anthropic")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test")
     monkeypatch.setenv("ANTHROPIC_PROFILE", "work")
     monkeypatch.setenv("CLAUDE_CODE_API_BASE_URL", "https://claude-code.example.test")
     monkeypatch.setenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", "https://oauth.example.test")
@@ -356,6 +357,8 @@ def test_default_agent_env_preserves_cli_login_but_not_provider_api_keys(monkeyp
 
     env = build_agent_env()
 
+    assert env["ANTHROPIC_API_KEY"] == "anthropic-test"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "anthropic-auth-test"
     assert env["ANTHROPIC_BASE_URL"] == "https://claude.example.test"
     assert env["ANTHROPIC_CONFIG_DIR"] == "/tmp/anthropic"
     assert env["ANTHROPIC_PROFILE"] == "work"
@@ -364,7 +367,6 @@ def test_default_agent_env_preserves_cli_login_but_not_provider_api_keys(monkeyp
     assert env["CLAUDE_CONFIG_DIR"] == "/tmp/claude"
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "claude-oauth-test"
     assert env["XDG_CONFIG_HOME"] == "/tmp/config"
-    assert "ANTHROPIC_API_KEY" not in env
     assert "CLAUDE_API_KEY" not in env
     assert "OPENAI_API_KEY" not in env
     assert "GEMINI_API_KEY" not in env

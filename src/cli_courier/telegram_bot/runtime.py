@@ -463,6 +463,9 @@ class TelegramBridgeBot:
                 application=application,
                 bot=bot,
             )
+            if session.replaces_output_snapshots:
+                self._interactive_output_chats.add(chat_id)
+                self._screenshot_watch_since_by_chat[chat_id] = time.time()
         action = "resumed" if resume_last else "started"
         return f"Agent {action}: {' '.join(session.command)}"
 
