@@ -148,7 +148,9 @@ MAX_TELEGRAM_CHUNK_CHARS=3500
 
 `AGENT_ENV_ALLOWLIST` is only needed for extra environment variables the child CLI agent
 must see. Provider API keys are not forwarded by default because they can override local
-CLI login credentials; add a key here only if you intentionally use API-key auth.
+CLI login credentials; add a key here only if you intentionally use API-key auth. Claude
+Code config/profile variables such as `ANTHROPIC_CONFIG_DIR` and `ANTHROPIC_PROFILE` are
+forwarded by default so CliCourier sees the same local login store as your direct shell.
 
 `DEFAULT_TELEGRAM_CHAT_ID` is only for proactive background output, such as auto-start
 messages before you send a command. The bot can only message a private chat after you have

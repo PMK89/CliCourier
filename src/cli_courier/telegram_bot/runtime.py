@@ -22,7 +22,13 @@ from cli_courier.agent.approval import (
 from cli_courier.agent.chunking import chunk_text
 from cli_courier.agent.output_filter import agent_output_in_progress, prepare_agent_output
 from cli_courier.agent.session import AgentSession
-from cli_courier.config import AgentOutputMode, Settings, TranscriptionBackend, WhisperBackend
+from cli_courier.config import (
+    AgentOutputMode,
+    Settings,
+    TranscriptionBackend,
+    WhisperBackend,
+    settings_summary_lines,
+)
 from cli_courier.filesystem import Sandbox, SandboxViolation
 from cli_courier.screenshots import ScreenshotError, ScreenshotService
 from cli_courier.security.terminal import safe_excerpt, sanitize_terminal_text
@@ -50,7 +56,7 @@ from cli_courier.telegram_bot.output_renderer import (
 )
 from cli_courier.telegram_bot.router import RouteKind, route_text
 from cli_courier.chat_history import ChatHistory
-from cli_courier.local_config import default_data_dir
+from cli_courier.local_config import default_config_path, default_data_dir
 from cli_courier.update import run_update
 from cli_courier.voice import (
     DisabledTranscriber,
@@ -385,8 +391,15 @@ class TelegramBridgeBot:
             )
         pending = "yes" if self.state.active_pending_action("approval", chat_id=message.chat_id) else "no"
         muted = "yes" if self._notifications_muted() else "no"
+        config_summary = "\n".join(
+            settings_summary_lines(
+                self.settings,
+                config_path=_active_config_path(),
+            )
+        )
         await self._reply_code(
             message,
+            f"{config_summary}\n"
             f"{agent_status}\n"
             f"workspace: {self.sandbox.display_path(self.state.cwd)}\n"
             f"pending approval: {pending}\n"
@@ -2349,6 +2362,11 @@ def approval_decision_from_reactions(reactions) -> ApprovalDecision | None:
         if decision is not None:
             return decision
     return None
+
+
+def _active_config_path() -> Path:
+    configured = os.environ.get("CLICOURIER_CONFIG")
+    return Path(configured).expanduser() if configured else default_config_path()
 
 
 def _bridge_restart_command(*, no_resume: bool = False) -> list[str]:

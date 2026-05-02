@@ -1679,7 +1679,10 @@ async def test_status_slash_command_is_forwarded_to_agent(tmp_path: Path) -> Non
     assert state.active_agent.sent[-1] == "/status"
 
 
-async def test_botstatus_is_handled_locally(tmp_path: Path) -> None:
+async def test_botstatus_is_handled_locally(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.env"
+    config_path.write_text("configured\n", encoding="utf-8")
+    monkeypatch.setenv("CLICOURIER_CONFIG", str(config_path))
     app_settings = settings(tmp_path)
     state = RuntimeState.create(tmp_path)
     bot = TelegramBridgeBot(
@@ -1699,6 +1702,10 @@ async def test_botstatus_is_handled_locally(tmp_path: Path) -> None:
 
     assert len(message.replies) == 1
     assert "<pre>" in message.replies[0]
+    assert f"path: {config_path}" in message.replies[0]
+    assert "valid: yes" in message.replies[0]
+    assert "telegram_token: present" in message.replies[0]
+    assert "allowed_users: 42" in message.replies[0]
     assert "agent: stopped" in message.replies[0]
     assert "output mode: final" in message.replies[0]
 
@@ -2293,7 +2300,6 @@ async def test_line_by_line_deltas_publish_and_edit_sixty_line_pages(tmp_path: P
         ),
         transcriber=DisabledTranscriber(),
     )
-
     task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
     try:
         for index in range(1, 61):
@@ -2348,7 +2354,6 @@ async def test_short_final_tail_after_line_deltas_keeps_full_buffered_output(
         ),
         transcriber=DisabledTranscriber(),
     )
-
     task = asyncio.create_task(bridge._flush_agent_output(bot_api, 100, session))
     try:
         for index in range(1, 76):
