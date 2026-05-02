@@ -280,6 +280,8 @@ def test_tmux_process_waits_longer_before_submitting_large_text(tmp_path, monkey
 
     def fake_run(command, **kwargs):
         calls.append(command)
+        if command[:3] == ["tmux", "capture-pane", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "x" * 80})()
         return type("Result", (), {"returncode": 0, "stdout": ""})()
 
     monkeypatch.setattr("cli_courier.agent.tmux.subprocess.run", fake_run)
@@ -302,8 +304,39 @@ def test_tmux_process_waits_longer_before_submitting_large_text(tmp_path, monkey
         ["tmux", "send-keys", "-t", "clicourier:0.0"],
         ["tmux", "send-keys", "-t", "clicourier:0.0"],
     ]
-    assert calls[-2] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
-    assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
+    assert ["tmux", "capture-pane", "-t", "clicourier:0.0", "-p", "-J", "-S", "-300"] in calls
+    assert calls[-2] == ["tmux", "send-keys", "-t", "clicourier:0.0", "-l", "\r"]
+    assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "-l", "\r"]
+
+
+def test_tmux_process_waits_for_visible_input_tail_before_submit(tmp_path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+    snapshots = iter(["", "partial prompt", "visible final tail"])
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[:3] == ["tmux", "capture-pane", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": next(snapshots)})()
+        return type("Result", (), {"returncode": 0, "stdout": ""})()
+
+    monkeypatch.setattr("cli_courier.agent.tmux.subprocess.run", fake_run)
+    monkeypatch.setattr("cli_courier.agent.tmux.time.sleep", lambda seconds: sleeps.append(seconds))
+    process = TmuxAgentProcess(
+        ["sh"],
+        cwd=tmp_path,
+        session_name="clicourier",
+        submit_delay_seconds=0,
+    )
+
+    process._send_text_with_submit("visible final tail", "\r")
+
+    capture_calls = [call for call in calls if call[:3] == ["tmux", "capture-pane", "-t"]]
+    assert len(capture_calls) == 3
+    assert len(sleeps) == 3
+    assert 0.15 < sleeps[0] < 0.16
+    assert sleeps[1:] == [0.05, 0.05]
+    assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "-l", "\r"]
 
 
 def test_default_agent_env_preserves_cli_login_but_not_provider_api_keys(monkeypatch) -> None:

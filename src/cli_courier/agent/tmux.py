@@ -13,6 +13,9 @@ from typing import Iterable
 _SESSION_SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _SEND_TEXT_CHUNK_CHARS = 700
 _LONG_TEXT_DOUBLE_SUBMIT_CHARS = 1000
+_VISIBLE_INPUT_TAIL_CHARS = 80
+_VISIBLE_INPUT_WAIT_SECONDS = 3.0
+_VISIBLE_INPUT_POLL_SECONDS = 0.05
 _AGENT_STATE_OPTION = "@clicourier_agent_state"
 _AGENT_STATE_RUNNING = "running"
 _AGENT_STATE_EXITED = "exited"
@@ -146,10 +149,9 @@ class TmuxAgentProcess:
     def _send_text_with_submit(self, text: str, submit_sequence: str) -> None:
         normalized = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").splitlines())
         if normalized:
-            # Use send-keys -l so both text and Enter go through the same key event
-            # queue, guaranteeing Enter is processed after the text. paste-buffer -p
-            # (bracketed paste) uses a separate path that can cause Enter to be dropped
-            # by Ink/React TUIs (like Claude Code) that buffer input during paste sequences.
+            # Use literal key injection and wait for the TUI to render the tail before
+            # submit. Ink/React TUIs can render pasted text after the key queue has
+            # advanced, which leaves text visible but unsubmitted if Enter arrives early.
             chunks = list(_text_chunks(normalized, _SEND_TEXT_CHUNK_CHARS))
             for index, chunk in enumerate(chunks):
                 subprocess.run(
@@ -161,11 +163,12 @@ class TmuxAgentProcess:
             delay = self._submit_delay_for_text(normalized)
             if delay > 0:
                 time.sleep(delay)
-        key = submit_sequence if submit_sequence and len(submit_sequence) > 1 else "Enter"
-        subprocess.run(["tmux", "send-keys", "-t", self.target, key], check=True)
-        if len(normalized) >= _LONG_TEXT_DOUBLE_SUBMIT_CHARS and key in {"Enter", "C-m"}:
+            self._wait_for_visible_input_tail(normalized)
+        submit = _tmux_submit_sequence(submit_sequence)
+        self._send_submit(submit)
+        if len(normalized) >= _LONG_TEXT_DOUBLE_SUBMIT_CHARS and submit in {"\r", "\n", "Enter", "C-m"}:
             time.sleep(0.35)
-            subprocess.run(["tmux", "send-keys", "-t", self.target, key], check=True)
+            self._send_submit(submit)
 
     def _submit_delay_for_text(self, text: str) -> float:
         if not text:
@@ -212,6 +215,22 @@ class TmuxAgentProcess:
         )
         return result.stdout.rstrip()
 
+    def _wait_for_visible_input_tail(self, text: str) -> None:
+        tail = text[-_VISIBLE_INPUT_TAIL_CHARS:]
+        if not tail:
+            return
+        deadline = time.monotonic() + _VISIBLE_INPUT_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            if tail in self._capture_snapshot():
+                return
+            time.sleep(_VISIBLE_INPUT_POLL_SECONDS)
+
+    def _send_submit(self, submit: str) -> None:
+        if submit in {"\r", "\n"}:
+            subprocess.run(["tmux", "send-keys", "-t", self.target, "-l", submit], check=True)
+            return
+        subprocess.run(["tmux", "send-keys", "-t", self.target, submit], check=True)
+
     def _has_session(self) -> bool:
         result = subprocess.run(
             ["tmux", "has-session", "-t", self.session_name],
@@ -241,6 +260,12 @@ def _shell_assignment(key: str, value: str) -> str:
 def _text_chunks(text: str, size: int) -> Iterable[str]:
     for start in range(0, len(text), size):
         yield text[start : start + size]
+
+
+def _tmux_submit_sequence(submit_sequence: str) -> str:
+    if submit_sequence in {"", "\r", "\n"}:
+        return "\r"
+    return submit_sequence
 
 
 def tmux_session_has_running_agent(session_name: str) -> bool:
