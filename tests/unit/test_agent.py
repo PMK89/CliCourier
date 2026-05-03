@@ -304,9 +304,9 @@ def test_tmux_process_waits_longer_before_submitting_large_text(tmp_path, monkey
         ["tmux", "send-keys", "-t", "clicourier:0.0"],
         ["tmux", "send-keys", "-t", "clicourier:0.0"],
     ]
-    assert ["tmux", "capture-pane", "-t", "clicourier:0.0", "-p", "-J", "-S", "-300"] in calls
-    assert calls[-2] == ["tmux", "send-keys", "-t", "clicourier:0.0", "-l", "\r"]
-    assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "-l", "\r"]
+    assert ["tmux", "capture-pane", "-t", "clicourier:0.0", "-p", "-J"] in calls
+    assert calls[-2] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
+    assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
 
 
 def test_tmux_process_waits_for_visible_input_tail_before_submit(tmp_path, monkeypatch) -> None:
@@ -336,7 +336,7 @@ def test_tmux_process_waits_for_visible_input_tail_before_submit(tmp_path, monke
     assert len(sleeps) == 3
     assert 0.15 < sleeps[0] < 0.16
     assert sleeps[1:] == [0.05, 0.05]
-    assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "-l", "\r"]
+    assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
 
 
 def test_default_agent_env_preserves_cli_login_but_not_provider_api_keys(monkeypatch) -> None:

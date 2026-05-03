@@ -235,19 +235,29 @@ class TmuxAgentProcess:
         )
         return result.stdout.rstrip()
 
+    def _capture_visible_snapshot(self) -> str:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", self.target, "-p", "-J"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        return result.stdout.rstrip()
+
     def _wait_for_visible_input_tail(self, text: str) -> None:
         tail = text[-_VISIBLE_INPUT_TAIL_CHARS:]
         if not tail:
             return
         deadline = time.monotonic() + _VISIBLE_INPUT_WAIT_SECONDS
         while time.monotonic() < deadline:
-            if tail in self._capture_snapshot():
+            if tail in self._capture_visible_snapshot():
                 return
             time.sleep(_VISIBLE_INPUT_POLL_SECONDS)
 
     def _send_submit(self, submit: str) -> None:
         if submit in {"\r", "\n"}:
-            subprocess.run(["tmux", "send-keys", "-t", self.target, "-l", submit], check=True)
+            subprocess.run(["tmux", "send-keys", "-t", self.target, "Enter"], check=True)
             return
         subprocess.run(["tmux", "send-keys", "-t", self.target, submit], check=True)
 
