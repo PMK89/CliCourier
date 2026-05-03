@@ -266,6 +266,12 @@ class TelegramBridgeBot:
             return
         action = self.state.pending_action(action_id)
         if action is None:
+            if choice_id in {"approve", "reject"}:
+                chat_id = getattr(getattr(query, "message", None), "chat_id", None)
+                active = self.state.active_pending_action("approval", chat_id=chat_id)
+                if active is not None:
+                    await self._handle_pending_approval_callback(active, choice_id, query, context)
+                    return
             await query.edit_message_text("This action expired or is no longer pending.")
             return
         message = getattr(query, "message", None)
@@ -1340,6 +1346,17 @@ class TelegramBridgeBot:
         if event.kind == AgentEventKind.APPROVAL_REQUESTED:
             await self._send_approval_event(bot, chat_id, session, event)
             return
+        if event.kind == AgentEventKind.APPROVAL_RESOLVED:
+            current = self.state.active_pending_action("approval", chat_id=chat_id)
+            if current is not None:
+                if current.message_id is not None:
+                    try:
+                        await bot.delete_message(chat_id=chat_id, message_id=current.message_id)
+                    except Exception:  # noqa: BLE001 - best-effort cleanup
+                        pass
+                self.state.clear_pending_actions(kind="approval", chat_id=chat_id)
+                self._last_approval_signature = None
+            return
         if event.kind == AgentEventKind.CHOICE_REQUEST:
             await self._send_choice_request_event(bot, chat_id, session, event)
             return
@@ -1389,10 +1406,10 @@ class TelegramBridgeBot:
                 f" tail_len={len(recent_output)} sig={self._last_approval_signature!r:.60}",
                 flush=True,
             )
-            # No active approval prompt. If the agent's auto-reviewer handled it,
-            # delete the stale Telegram button so the user doesn't see an expired action.
+            # No approval prompt visible — cleared by console input, auto-approval, or
+            # any other means. Absence of the prompt is the signal to clean up Telegram state.
             current = self.state.active_pending_action("approval", chat_id=chat_id)
-            if current is not None and has_auto_approval_marker(recent_output):
+            if current is not None:
                 if current.message_id is not None:
                     try:
                         await bot.delete_message(chat_id=chat_id, message_id=current.message_id)
@@ -1411,6 +1428,14 @@ class TelegramBridgeBot:
                 flush=True,
             )
             self.state.clear_pending_action(current.id)
+            self._last_approval_signature = None
+        elif pending.prompt_excerpt == self._last_approval_signature:
+            # Same prompt but action has expired while the terminal is still waiting.
+            # Clear the signature so a fresh approval message is sent.
+            print(
+                f"clicourier approval_reissue chat_id={chat_id} (action expired, terminal still waiting)",
+                flush=True,
+            )
             self._last_approval_signature = None
         if pending.prompt_excerpt == self._last_approval_signature:
             return

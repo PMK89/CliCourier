@@ -246,7 +246,7 @@ def pending_approval_action(
     chat_id: int | None,
     source_event_id: str | None,
     prompt: str,
-    ttl: timedelta = timedelta(minutes=10),
+    ttl: timedelta = timedelta(hours=8),
     now: datetime | None = None,
     data: dict[str, Any] | None = None,
 ) -> PendingAction:

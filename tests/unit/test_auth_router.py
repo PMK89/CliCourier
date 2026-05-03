@@ -1098,6 +1098,40 @@ async def test_stale_callback_is_rejected(tmp_path: Path) -> None:
     assert query.edits == ["This action expired or is no longer pending."]
 
 
+async def test_expired_approval_callback_falls_back_to_active_approval(tmp_path: Path) -> None:
+    state = RuntimeState.create(tmp_path)
+    state.active_agent = FakeAgent()
+    active_action = state.add_pending_action(
+        pending_approval_action(
+            session_id="codex",
+            chat_id=100,
+            source_event_id="evt_1",
+            prompt="Run command?",
+        )
+    )
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    # Simulate pressing "Approve" on an old, expired action ID
+    query = FakeCallbackQuery("cc:act_oldexpired:approve")
+
+    await bridge.handle_callback(FakeCallbackUpdate(query), FakeContext())
+
+    bridge._stop_typing(100)
+    assert state.active_agent.sent == ["y"]
+    assert state.pending_action(active_action.id) is None
+    assert query.edits == []
+    assert query.message.deleted
+
+
 async def test_approval_callback_requires_matching_pending_action(tmp_path: Path) -> None:
     state = RuntimeState.create(tmp_path)
     state.active_agent = FakeAgent()
@@ -1161,6 +1195,80 @@ async def test_approval_callback_rejects_wrong_chat(tmp_path: Path) -> None:
     assert state.pending_action(action.id) is action
     assert state.active_agent.sent == []
     assert query.edits == ["This action belongs to a different chat."]
+
+
+async def test_fallback_approval_clears_state_when_prompt_gone(tmp_path: Path) -> None:
+    state = RuntimeState.create(tmp_path)
+    action = state.add_pending_action(
+        pending_approval_action(
+            session_id="claude",
+            chat_id=100,
+            source_event_id="evt_1",
+            prompt="Run command?",
+        )
+    )
+    action.message_id = 42
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bridge._last_approval_signature = "Run command?"
+    bot_api = FakeBot()
+    session = FakeFlushSession()
+
+    await bridge._maybe_emit_fallback_approval(bot_api, 100, session)
+
+    assert state.active_pending_action("approval", chat_id=100) is None
+    assert (100, 42) in bot_api.deleted_messages
+    assert bridge._last_approval_signature is None
+
+
+async def test_approval_resolved_event_clears_pending_state(tmp_path: Path) -> None:
+    state = RuntimeState.create(tmp_path)
+    action = state.add_pending_action(
+        pending_approval_action(
+            session_id="codex",
+            chat_id=100,
+            source_event_id="evt_1",
+            prompt="Run command?",
+        )
+    )
+    action.message_id = 99
+    bridge = TelegramBridgeBot(
+        settings=settings(tmp_path),
+        state=state,
+        sandbox=Sandbox(tmp_path, cat_max_bytes=1024, sendfile_max_bytes=1024),
+        screenshot_service=ScreenshotService(
+            workspace_root=tmp_path,
+            screenshot_dir=None,
+            max_bytes=1024,
+        ),
+        transcriber=DisabledTranscriber(),
+    )
+    bridge._last_approval_signature = "Run command?"
+    bot_api = FakeBot()
+
+    await bridge._handle_agent_event(
+        bot_api,
+        100,
+        state.active_agent,
+        AgentEvent(
+            kind=AgentEventKind.APPROVAL_RESOLVED,
+            text="approved",
+            session_id="codex",
+        ),
+    )
+
+    assert state.active_pending_action("approval", chat_id=100) is None
+    assert (100, 99) in bot_api.deleted_messages
+    assert bridge._last_approval_signature is None
 
 
 async def test_audio_message_is_transcribed_like_voice(tmp_path: Path) -> None:
