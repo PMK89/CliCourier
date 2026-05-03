@@ -1343,6 +1343,7 @@ class TelegramBridgeBot:
                     )
                     self._stop_typing(chat_id)
                     pending_text = ""
+                    session.advance_baseline()
                     if was_interactive:
                         await self._send_turn_done_notification(bot, chat_id, allow_muted=True)
                     continue
@@ -1363,6 +1364,7 @@ class TelegramBridgeBot:
                         )
                     self._stop_typing(chat_id)
                     pending_text = ""
+                    session.advance_baseline()
                     if was_interactive:
                         await self._send_turn_done_notification(bot, chat_id, allow_muted=True)
                 if event.kind in {AgentEventKind.TURN_COMPLETED, AgentEventKind.TURN_FAILED, AgentEventKind.ERROR}:
@@ -1397,6 +1399,11 @@ class TelegramBridgeBot:
                 if should_forward_progress:
                     await self._maybe_emit_fallback_approval(bot, chat_id, session)
             except asyncio.TimeoutError:
+                if not session._turn_in_progress and pending_text:
+                    # TUI noise between turns — absorb without sending.
+                    session.advance_baseline()
+                    pending_text = ""
+                    last_output_at = None
                 completed_signature = await self._maybe_complete_idle_terminal_output(
                     bot,
                     chat_id,
@@ -1409,6 +1416,7 @@ class TelegramBridgeBot:
                     completed_terminal_signature = completed_signature
                     pending_text = ""
                     last_output_at = None
+                    session.advance_baseline()
                 await self._render_terminal_progress(bot, chat_id)
                 if chat_id in self._interactive_output_chats or not session.replaces_output_snapshots:
                     await self._maybe_emit_fallback_approval(bot, chat_id, session)
@@ -1427,6 +1435,7 @@ class TelegramBridgeBot:
                 complete_request=True,
             )
             self._stop_typing(chat_id)
+            session.advance_baseline()
 
     async def _maybe_complete_idle_terminal_output(
         self,

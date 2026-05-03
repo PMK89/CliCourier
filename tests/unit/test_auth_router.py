@@ -498,12 +498,16 @@ class FakeFlushSession:
         self.output_queue: asyncio.Queue[str] = asyncio.Queue()
         self.is_running = True
         self.current_tool = None
+        self._turn_in_progress = True
 
     def recent_output(self, max_chars: int | None = None) -> str:
         return ""
 
     def recent_visible_output(self, max_chars: int | None = None) -> str:
         return ""
+
+    def advance_baseline(self) -> None:
+        pass
 
     def status(self):
         return SimpleNamespace(

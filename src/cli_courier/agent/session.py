@@ -81,6 +81,7 @@ class AgentSession:
         self.state = "starting"
         self.current_tool: str | None = None
         self.last_event: AgentEvent | None = None
+        self._turn_in_progress = False
 
     @property
     def is_running(self) -> bool:
@@ -133,6 +134,19 @@ class AgentSession:
         self._snapshot_baseline = self._last_raw_snapshot if self.replaces_output_snapshots else ""
         self._buffer.clear()
         self._visible_buffer.clear()
+        self._turn_in_progress = True
+
+    def advance_baseline(self) -> None:
+        """Advance the snapshot baseline to the current snapshot after a turn completes.
+
+        Prevents the diff algorithm from re-emitting already-sent content when the
+        tmux poller fires after completion.
+        """
+        self._turn_in_progress = False
+        if not self.replaces_output_snapshots:
+            return
+        self._drain_pending_output()
+        self._snapshot_baseline = self._last_raw_snapshot
 
     def status(self) -> AgentRuntimeStatus:
         return AgentRuntimeStatus(
