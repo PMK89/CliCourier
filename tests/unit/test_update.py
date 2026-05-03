@@ -14,7 +14,7 @@ def test_update_reinstalls_uv_tool_when_no_checkout(monkeypatch) -> None:
     monkeypatch.setattr(update.shutil, "which", lambda name: "/usr/bin/uv" if name == "uv" else None)
     monkeypatch.setattr(update.subprocess, "run", fake_run)
 
-    result = update.run_tool_update(repo_error="Cannot locate CliCourier repo root")
+    result = update.run_tool_update()
 
     assert result.success is True
     assert result.changed is True

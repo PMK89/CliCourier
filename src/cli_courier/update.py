@@ -47,7 +47,7 @@ def run_update() -> UpdateResult:
     try:
         repo = find_repo_root()
     except RuntimeError as exc:
-        return run_tool_update(repo_error=str(exc))
+        return run_tool_update()
 
     _git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
@@ -176,7 +176,7 @@ def run_update() -> UpdateResult:
     )
 
 
-def run_tool_update(*, repo_error: str) -> UpdateResult:
+def run_tool_update() -> UpdateResult:
     before_version = installed_version()
     uv = shutil.which("uv")
     if uv is None:
@@ -186,11 +186,11 @@ def run_tool_update(*, repo_error: str) -> UpdateResult:
             after_hash=before_version,
             changed=False,
             error=(
-                f"{repo_error}; uv not found on PATH. Reinstall with: "
+                "uv not found on PATH. Reinstall with: "
                 "curl -LsSf https://raw.githubusercontent.com/PMK89/CliCourier/main/install.sh | sh"
             ),
         )
-    lines = [repo_error, "No editable checkout found; reinstalling the uv tool from GitHub."]
+    lines = ["Fetching latest from GitHub…"]
     target = f"git+{DEFAULT_REPO_URL}"
     try:
         install = subprocess.run(
