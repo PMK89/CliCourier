@@ -28,6 +28,14 @@ _LONG_TEXT_DOUBLE_SUBMIT_CHARS = 1000
 _VISIBLE_INPUT_TAIL_CHARS = 80
 _VISIBLE_INPUT_WAIT_SECONDS = 3.0
 _VISIBLE_INPUT_POLL_SECONDS = 0.05
+# Number of lines from the bottom of the pane to search for the input tail.
+# The input box is always at the bottom of the Ink TUI; restricting the search
+# avoids false matches against identical text in Claude's output area.
+_INPUT_AREA_LINES = 8
+# Extra settle time after the input tail is visible: Node.js's event loop reads
+# stdin asynchronously, so PTY echo can make the text appear in capture-pane
+# before Ink has finished processing the keypresses into React state.
+_VISIBLE_INPUT_SETTLE_SECONDS = 0.15
 _AGENT_STATE_OPTION = "@clicourier_agent_state"
 _AGENT_STATE_RUNNING = "running"
 _AGENT_STATE_EXITED = "exited"
@@ -251,7 +259,10 @@ class TmuxAgentProcess:
             return
         deadline = time.monotonic() + _VISIBLE_INPUT_WAIT_SECONDS
         while time.monotonic() < deadline:
-            if tail in self._capture_visible_snapshot():
+            snapshot = self._capture_visible_snapshot()
+            bottom = "\n".join(snapshot.splitlines()[-_INPUT_AREA_LINES:])
+            if tail in bottom:
+                time.sleep(_VISIBLE_INPUT_SETTLE_SECONDS)
                 return
             time.sleep(_VISIBLE_INPUT_POLL_SECONDS)
 

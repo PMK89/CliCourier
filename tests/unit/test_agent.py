@@ -295,7 +295,7 @@ def test_tmux_process_waits_longer_before_submitting_large_text(tmp_path, monkey
 
     process._send_text_with_submit("x" * 4000, "\r")
 
-    assert sleeps == [0.08, 0.08, 0.08, 0.08, 0.08, 1.15, 0.35]
+    assert sleeps == [0.08, 0.08, 0.08, 0.08, 0.08, 1.15, 0.15, 0.35]
     assert [call[:4] for call in calls[:6]] == [
         ["tmux", "send-keys", "-t", "clicourier:0.0"],
         ["tmux", "send-keys", "-t", "clicourier:0.0"],
@@ -333,9 +333,10 @@ def test_tmux_process_waits_for_visible_input_tail_before_submit(tmp_path, monke
 
     capture_calls = [call for call in calls if call[:3] == ["tmux", "capture-pane", "-t"]]
     assert len(capture_calls) == 3
-    assert len(sleeps) == 3
+    assert len(sleeps) == 4
     assert 0.15 < sleeps[0] < 0.16
-    assert sleeps[1:] == [0.05, 0.05]
+    assert sleeps[1:3] == [0.05, 0.05]
+    assert sleeps[3] == 0.15  # settle delay after tail found
     assert calls[-1] == ["tmux", "send-keys", "-t", "clicourier:0.0", "Enter"]
 
 
