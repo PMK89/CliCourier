@@ -70,6 +70,10 @@ from cli_courier.voice import (
 TERMINAL_PROGRESS_PAGE_LINES = 60
 TELEGRAM_PROGRESS_SAFE_LIMIT = TELEGRAM_SAFE_LIMIT
 
+_LOGIN_COMMAND_RE = re.compile(r"\bclaude\b.*\b(login|auth)\b", re.IGNORECASE)
+_HTTPS_URL_RE = re.compile(r"https://\S+")
+_LOCALHOST_URL_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?/", re.IGNORECASE)
+
 
 class TelegramBridgeBot:
     def __init__(
@@ -271,6 +275,9 @@ class TelegramBridgeBot:
         elif route.kind == RouteKind.BLOCKED_APPROVAL:
             await message.reply_text("No approval is pending. Use /agent yes to send that text anyway.")
         elif route.kind == RouteKind.AGENT_TEXT:
+            if _LOCALHOST_URL_RE.match(route.text.strip()):
+                await self._handle_oauth_callback_url(route.text.strip(), message, context)
+                return
             await self._send_to_agent(route.text, message, context, image_paths=image_paths, file_paths=file_paths)
 
     async def handle_callback(self, update, context) -> None:
@@ -890,6 +897,82 @@ class TelegramBridgeBot:
             ),
         )
 
+    async def _handle_oauth_callback_url(self, url: str, message, context) -> None:
+        """Forward an OAuth PKCE callback URL to the VPS localhost to complete login."""
+        await message.reply_text("Forwarding OAuth callback to localhost…")
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10", url],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+            )
+            status = result.stdout.strip() or "?"
+            if status.startswith(("2", "3")):
+                await message.reply_text(f"OAuth callback completed (HTTP {status}). Login should finish momentarily.")
+            else:
+                stderr = result.stderr.strip()
+                await message.reply_text(
+                    f"OAuth callback returned HTTP {status}."
+                    + (f"\n{stderr[:400]}" if stderr else "")
+                )
+        except Exception as exc:
+            await message.reply_text(f"Failed to forward callback: {exc}")
+
+    async def _handle_login_console_command(self, command_text: str, message, context) -> None:
+        """Run a claude login command with streaming output and OAuth URL extraction."""
+        await message.reply_text(f"Running `{command_text}` (up to 5 min)…")
+        url_forwarded = False
+        output_lines: list[str] = []
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                command_text,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=str(self.settings.workspace_root),
+            )
+            deadline = asyncio.get_event_loop().time() + 300
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    proc.kill()
+                    await message.reply_text("Login command timed out (5 min).")
+                    return
+                try:
+                    raw = await asyncio.wait_for(proc.stdout.readline(), timeout=min(5.0, remaining))
+                except asyncio.TimeoutError:
+                    continue
+                if not raw:
+                    break
+                line = raw.decode("utf-8", errors="replace").rstrip()
+                if line:
+                    output_lines.append(line)
+                if not url_forwarded:
+                    url_match = _HTTPS_URL_RE.search(line)
+                    if url_match:
+                        url = url_match.group(0).rstrip(".,;:)")
+                        await self._safe_send_message(
+                            context.bot,
+                            chat_id=message.chat_id,
+                            text=(
+                                f"Open this URL to authenticate:\n{url}\n\n"
+                                "If your browser redirects to a localhost error page after authorizing, "
+                                "copy the full URL from the address bar and send it here."
+                            ),
+                        )
+                        url_forwarded = True
+            await proc.wait()
+        except Exception as exc:
+            await message.reply_text(f"Login command failed: {exc}")
+            return
+        if proc.returncode == 0:
+            await message.reply_text("Login completed successfully.")
+        else:
+            tail = "\n".join(output_lines[-10:])
+            await self._reply_code(message, f"exit {proc.returncode}\n{tail}"[:2000])
+
     async def _handle_console_command(self, command_text: str, message, context) -> None:
         if not command_text:
             await message.reply_text("Usage: !<shell command> or !ctrl+c, !ctrl+d, etc.")
@@ -915,6 +998,9 @@ class TelegramBridgeBot:
                 await message.reply_text(f"Failed to send keystroke: {exc}")
                 return
             await message.reply_text(f"Sent: {command_text}")
+            return
+        if _LOGIN_COMMAND_RE.search(command_text):
+            await self._handle_login_console_command(command_text, message, context)
             return
         try:
             result = await asyncio.to_thread(
