@@ -25,6 +25,7 @@ from cli_courier.telegram_bot.dashboard import DashboardSnapshot, render_dashboa
 from cli_courier.telegram_bot.router import RouteKind, route_text
 from cli_courier.telegram_bot.runtime import (
     TelegramBridgeBot,
+    _parse_key_combo,
     approval_decision_from_reactions,
     detect_interactive_choices,
     extract_screenshot_reference,
@@ -99,6 +100,63 @@ def test_route_maps_emoji_approval_when_pending() -> None:
 def test_route_sends_regular_text_to_agent() -> None:
     route = route_text("please inspect the diff", has_pending_approval=False)
     assert route.kind == RouteKind.AGENT_TEXT
+
+
+def test_route_console_command_basic() -> None:
+    route = route_text("!ls -la", has_pending_approval=False)
+    assert route.kind == RouteKind.CONSOLE_COMMAND
+    assert route.text == "ls -la"
+
+
+def test_route_console_command_keystroke() -> None:
+    route = route_text("!ctrl+c", has_pending_approval=False)
+    assert route.kind == RouteKind.CONSOLE_COMMAND
+    assert route.text == "ctrl+c"
+
+
+def test_route_console_command_bare_bang() -> None:
+    route = route_text("!", has_pending_approval=False)
+    assert route.kind == RouteKind.CONSOLE_COMMAND
+    assert route.text == ""
+
+
+def test_route_console_command_takes_precedence_over_approval() -> None:
+    route = route_text("!yes", has_pending_approval=True)
+    assert route.kind == RouteKind.CONSOLE_COMMAND
+
+
+def test_parse_key_combo_ctrl_c() -> None:
+    assert _parse_key_combo("ctrl+c") == "C-c"
+
+
+def test_parse_key_combo_ctrl_d() -> None:
+    assert _parse_key_combo("ctrl+d") == "C-d"
+
+
+def test_parse_key_combo_accepts_cntl_typo() -> None:
+    assert _parse_key_combo("cntl+c") == "C-c"
+
+
+def test_parse_key_combo_ctrl_alt_del() -> None:
+    assert _parse_key_combo("ctrl+alt+del") == "C-M-Delete"
+
+
+def test_parse_key_combo_shift_f5() -> None:
+    assert _parse_key_combo("shift+f5") == "S-F5"
+
+
+def test_parse_key_combo_not_a_combo() -> None:
+    assert _parse_key_combo("ls") is None
+    assert _parse_key_combo("ps aux") is None
+    assert _parse_key_combo("c") is None
+
+
+def test_parse_key_combo_unknown_modifier() -> None:
+    assert _parse_key_combo("win+d") is None
+
+
+def test_parse_key_combo_unknown_key() -> None:
+    assert _parse_key_combo("ctrl+reboot") is None
 
 
 class FakeReaction:

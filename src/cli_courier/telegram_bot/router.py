@@ -9,6 +9,7 @@ from cli_courier.telegram_bot.commands import ParsedCommand, parse_command
 
 class RouteKind(str, Enum):
     COMMAND = "command"
+    CONSOLE_COMMAND = "console_command"
     AGENT_TEXT = "agent_text"
     APPROVAL = "approval"
     BLOCKED_APPROVAL = "blocked_approval"
@@ -26,6 +27,9 @@ class TextRoute:
 def route_text(text: str, *, has_pending_approval: bool) -> TextRoute:
     if not text or not text.strip():
         return TextRoute(kind=RouteKind.EMPTY)
+    stripped = text.strip()
+    if stripped.startswith("!"):
+        return TextRoute(kind=RouteKind.CONSOLE_COMMAND, text=stripped[1:].strip())
     command = parse_command(text)
     if command is not None:
         return TextRoute(kind=RouteKind.COMMAND, command=command)

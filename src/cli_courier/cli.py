@@ -429,12 +429,25 @@ def restart_agent_terminal_plan(
 def reset_tmux_session_for_restart(session_name: str) -> None:
     if current_tmux_session_name() == session_name:
         return
+    if _tmux_session_has_attached_client(session_name):
+        return
     subprocess.run(
         ["tmux", "kill-session", "-t", session_name],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,
     )
+
+
+def _tmux_session_has_attached_client(session_name: str) -> bool:
+    result = subprocess.run(
+        ["tmux", "list-clients", "-t", session_name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def current_tmux_session_name() -> str | None:

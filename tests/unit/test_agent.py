@@ -417,6 +417,8 @@ async def test_tmux_start_replaces_existing_dead_session(tmp_path, monkeypatch) 
             return type("Result", (), {"returncode": 0 if agent_state else 1, "stdout": agent_state})()
         if command[:4] == ["tmux", "display-message", "-p", "-t"]:
             return type("Result", (), {"returncode": 0, "stdout": "claude\n"})()
+        if command[:3] == ["tmux", "list-clients", "-t"]:
+            return type("Result", (), {"returncode": 1, "stdout": ""})()
         if command[:3] == ["tmux", "kill-session", "-t"]:
             has_session = False
             live_pane = False
@@ -465,6 +467,8 @@ async def test_tmux_start_replaces_existing_unmanaged_live_session(tmp_path, mon
             return type("Result", (), {"returncode": 0 if agent_state else 1, "stdout": agent_state})()
         if command[:4] == ["tmux", "display-message", "-p", "-t"]:
             return type("Result", (), {"returncode": 0, "stdout": "claude\n"})()
+        if command[:3] == ["tmux", "list-clients", "-t"]:
+            return type("Result", (), {"returncode": 1, "stdout": ""})()
         if command[:3] == ["tmux", "kill-session", "-t"]:
             has_session = False
             live_pane = False

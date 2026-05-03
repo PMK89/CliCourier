@@ -524,12 +524,35 @@ def test_restart_tmux_reset_skips_current_attached_session(monkeypatch) -> None:
 def test_restart_tmux_reset_kills_stale_agent_session(monkeypatch) -> None:
     calls = []
 
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[:3] == ["tmux", "list-clients", "-t"]:
+            return type("Result", (), {"returncode": 1, "stdout": ""})()
+        return None
+
     monkeypatch.setattr("cli_courier.cli.current_tmux_session_name", lambda: None)
-    monkeypatch.setattr("cli_courier.cli.subprocess.run", lambda command, **kwargs: calls.append(command))
+    monkeypatch.setattr("cli_courier.cli.subprocess.run", fake_run)
 
     cli_courier_cli.reset_tmux_session_for_restart("clicourier")
 
-    assert calls == [["tmux", "kill-session", "-t", "clicourier"]]
+    assert ["tmux", "kill-session", "-t", "clicourier"] in calls
+
+
+def test_restart_tmux_reset_preserves_session_with_attached_client(monkeypatch) -> None:
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[:3] == ["tmux", "list-clients", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": "/dev/pts/0: clicourier\n"})()
+        return None
+
+    monkeypatch.setattr("cli_courier.cli.current_tmux_session_name", lambda: None)
+    monkeypatch.setattr("cli_courier.cli.subprocess.run", fake_run)
+
+    cli_courier_cli.reset_tmux_session_for_restart("clicourier")
+
+    assert ["tmux", "kill-session", "-t", "clicourier"] not in calls
 
 
 def test_infer_adapter_uses_known_agent_commands() -> None:

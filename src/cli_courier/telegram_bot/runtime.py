@@ -241,6 +241,8 @@ class TelegramBridgeBot:
             )
         elif route.kind == RouteKind.APPROVAL and route.approval_decision is not None:
             await self._handle_approval(route.approval_decision, message, context)
+        elif route.kind == RouteKind.CONSOLE_COMMAND:
+            await self._handle_console_command(route.text, message, context)
         elif route.kind == RouteKind.BLOCKED_APPROVAL:
             await message.reply_text("No approval is pending. Use /agent yes to send that text anyway.")
         elif route.kind == RouteKind.AGENT_TEXT:
@@ -832,6 +834,51 @@ class TelegramBridgeBot:
                 session_id=session.adapter.id,
             ),
         )
+
+    async def _handle_console_command(self, command_text: str, message, context) -> None:
+        if not command_text:
+            await message.reply_text("Usage: !<shell command> or !ctrl+c, !ctrl+d, etc.")
+            return
+        key = _parse_key_combo(command_text)
+        if key is not None:
+            agent = self.state.active_agent
+            if agent is None or not agent.is_running:
+                await message.reply_text("No active agent to send keystroke to.")
+                return
+            from cli_courier.agent.tmux import TmuxAgentProcess
+            tmux_proc = getattr(agent, "_process", None)
+            if not isinstance(tmux_proc, TmuxAgentProcess):
+                await message.reply_text("Keystroke sending requires the tmux backend.")
+                return
+            try:
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["tmux", "send-keys", "-t", tmux_proc.target, key],
+                    check=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                await message.reply_text(f"Failed to send keystroke: {exc}")
+                return
+            await message.reply_text(f"Sent: {command_text}")
+            return
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                command_text,
+                shell=True,
+                cwd=str(self.settings.workspace_root),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            output = ((result.stdout or "") + (result.stderr or "")).strip() or "(no output)"
+            if result.returncode != 0:
+                output = f"exit {result.returncode}\n{output}"
+            await self._reply_code(message, output[:3000])
+        except subprocess.TimeoutExpired:
+            await message.reply_text("Command timed out (30s limit).")
+        except Exception as exc:  # noqa: BLE001 - surfaced to trusted operator
+            await message.reply_text(f"Command failed: {exc}")
 
     async def _handle_voice(self, message, context, *, stop_typing: bool = False) -> None:
         attachment = self._audio_attachment(message)
@@ -2380,6 +2427,43 @@ def approval_decision_from_reactions(reactions) -> ApprovalDecision | None:
 def _active_config_path() -> Path:
     configured = os.environ.get("CLICOURIER_CONFIG")
     return Path(configured).expanduser() if configured else default_config_path()
+
+
+_KEY_MODIFIERS: frozenset[str] = frozenset({"ctrl", "cntl", "alt", "shift", "meta", "super", "cmd"})
+_KEY_MODIFIER_PREFIX: dict[str, str] = {
+    "ctrl": "C-", "cntl": "C-", "alt": "M-", "meta": "M-", "super": "M-", "cmd": "M-", "shift": "S-"
+}
+_NAMED_KEYS: dict[str, str] = {
+    "del": "Delete", "delete": "Delete",
+    "esc": "Escape", "escape": "Escape",
+    "tab": "Tab",
+    "enter": "Enter", "return": "Enter",
+    "up": "Up", "down": "Down", "left": "Left", "right": "Right",
+    "home": "Home", "end": "End",
+    "pgup": "PPage", "pageup": "PPage",
+    "pgdn": "NPage", "pagedown": "NPage",
+    "bs": "BSpace", "backspace": "BSpace",
+    "ins": "IC", "insert": "IC",
+    "space": "Space",
+    **{f"f{i}": f"F{i}" for i in range(1, 13)},
+}
+
+
+def _parse_key_combo(text: str) -> str | None:
+    """Parse 'ctrl+c' or 'ctrl+alt+del' to a tmux send-keys string, or None if not a key combo."""
+    parts = text.lower().strip().split("+")
+    if len(parts) < 2:
+        return None
+    modifiers, key_part = parts[:-1], parts[-1]
+    if not all(m in _KEY_MODIFIERS for m in modifiers):
+        return None
+    tmux_key = _NAMED_KEYS.get(key_part)
+    if tmux_key is None:
+        if len(key_part) == 1 and (key_part.isalpha() or key_part.isdigit()):
+            tmux_key = key_part
+        else:
+            return None
+    return "".join(_KEY_MODIFIER_PREFIX[m] for m in modifiers) + tmux_key
 
 
 def _bridge_restart_command(*, no_resume: bool = False) -> list[str]:

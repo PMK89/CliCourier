@@ -10,6 +10,18 @@ from pathlib import Path
 from typing import Iterable
 
 
+def tmux_session_has_attached_client(session_name: str) -> bool:
+    """Return True if any terminal is currently attached to the tmux session."""
+    result = subprocess.run(
+        ["tmux", "list-clients", "-t", session_name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
 _SESSION_SAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _SEND_TEXT_CHUNK_CHARS = 700
 _LONG_TEXT_DOUBLE_SUBMIT_CHARS = 1000
@@ -98,7 +110,8 @@ class TmuxAgentProcess:
                 pass
             self._reader_task = None
         if self._created_session and self._has_session():
-            await asyncio.to_thread(self._kill_session)
+            if not tmux_session_has_attached_client(self.session_name):
+                await asyncio.to_thread(self._kill_session)
 
     async def send_line(self, text: str, *, submit_sequence: str = "Enter") -> None:
         if not self.is_running:
