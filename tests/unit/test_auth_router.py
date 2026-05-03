@@ -1929,6 +1929,7 @@ async def test_post_init_autostarts_agent_without_sending_startup_messages(
         return "Agent started: codex"
 
     monkeypatch.setattr(bot, "_start_agent_session", fake_start_agent_session)
+    monkeypatch.setattr("cli_courier.telegram_bot.runtime.check_update_available", lambda: (False, None))
     fake_bot = FakeBot()
     application = SimpleNamespace(bot=fake_bot)
 

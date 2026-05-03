@@ -57,7 +57,7 @@ from cli_courier.telegram_bot.output_renderer import (
 from cli_courier.telegram_bot.router import RouteKind, route_text
 from cli_courier.chat_history import ChatHistory
 from cli_courier.local_config import default_config_path, default_data_dir
-from cli_courier.update import run_update
+from cli_courier.update import check_update_available, run_update
 from cli_courier.voice import (
     DisabledTranscriber,
     FasterWhisperTranscriber,
@@ -129,6 +129,7 @@ class TelegramBridgeBot:
         await application.bot.set_my_commands(
             [BotCommand(command=name, description=description) for name, description in BOT_COMMAND_SPECS]
         )
+        await self._check_and_notify_update(application.bot)
         if not self.settings.auto_start_agent:
             return
         if self.settings.default_telegram_chat_id is None:
@@ -184,6 +185,30 @@ class TelegramBridgeBot:
         if agent is not None:
             await agent.stop()
             self.state.active_agent = None
+
+    async def _check_and_notify_update(self, bot) -> None:
+        chat_id = self.settings.default_telegram_chat_id
+        if chat_id is None:
+            return
+        if self._notifications_muted():
+            return
+        try:
+            available, remote_hash = await asyncio.to_thread(check_update_available)
+        except Exception:
+            return
+        if not available:
+            return
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("Update & Restart", callback_data="clicourier:update_restart"),
+        ]])
+        await self._safe_send_message(
+            bot,
+            chat_id=chat_id,
+            text=f"A new version is available (remote: {remote_hash}). Tap to update and restart.",
+            reply_markup=keyboard,
+        )
 
     async def handle_update(self, update, context) -> None:
         identity = self._identity(update)
@@ -258,6 +283,10 @@ class TelegramBridgeBot:
             return
         await query.answer()
         data = query.data or ""
+        if data.startswith("clicourier:"):
+            bridge_action = data[len("clicourier:"):]
+            await self._handle_bridge_callback(bridge_action, query, context)
+            return
         parts = data.split(":", 2)
         if len(parts) != 3:
             return
@@ -287,6 +316,18 @@ class TelegramBridgeBot:
             await self._handle_pending_voice_callback(action, choice_id, query, context)
         elif action.kind == "choice_request":
             await self._handle_pending_choice_callback(action, choice_id, query, context)
+
+    async def _handle_bridge_callback(self, action: str, query, context) -> None:
+        if action == "update_restart":
+            await query.edit_message_text("Updating CliCourier…")
+            result = await asyncio.to_thread(run_update)
+            if not result.success:
+                await query.edit_message_text(f"Update failed: {result.error}")
+                return
+            await query.edit_message_text(result.summary())
+            message = getattr(query, "message", None)
+            if message is not None:
+                await self._cmd_restart_bridge("", message, context)
 
     async def handle_reaction(self, update, context) -> None:
         reaction_update = update.message_reaction
@@ -561,7 +602,15 @@ class TelegramBridgeBot:
     async def _cmd_update(self, args: str, message, context) -> None:
         await message.reply_text("Updating CliCourier…")
         result = await asyncio.to_thread(run_update)
-        await message.reply_text(result.summary())
+        if result.success and result.changed:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("Restart now", callback_data="clicourier:update_restart"),
+            ]])
+            await message.reply_text(result.summary(), reply_markup=keyboard)
+        else:
+            await message.reply_text(result.summary())
 
     async def _cmd_agent(
         self,

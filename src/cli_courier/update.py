@@ -239,6 +239,46 @@ def run_tool_update(*, repo_error: str) -> UpdateResult:
     )
 
 
+def check_update_available() -> tuple[bool, str | None]:
+    """Fetch origin/main and compare HEAD without applying any changes.
+
+    Returns (update_available, remote_short_hash). Both False/None on network
+    or repo errors so callers can silently skip the notification.
+    """
+    try:
+        repo = find_repo_root()
+    except RuntimeError:
+        return False, None
+
+    _git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            env=_git_env,
+            timeout=30,
+        )
+
+    try:
+        fetch = git("fetch", "origin", "main")
+    except subprocess.TimeoutExpired:
+        return False, None
+    if fetch.returncode != 0:
+        return False, None
+
+    local = git("rev-parse", "--short", "HEAD").stdout.strip()
+    remote = git("rev-parse", "--short", "origin/main").stdout.strip()
+    if not local or not remote:
+        return False, None
+
+    return local != remote, remote
+
+
 def installed_version() -> str:
     try:
         return version(PACKAGE_NAME)
