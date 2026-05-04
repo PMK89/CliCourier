@@ -1373,6 +1373,12 @@ class TelegramBridgeBot:
                 if event.kind != AgentEventKind.ASSISTANT_DELTA:
                     await self._maybe_update_dashboard(bot, chat_id, session)
                     continue
+                if not session._turn_in_progress:
+                    # Absorb TUI updates that arrive before the user sends a message.
+                    session.advance_baseline()
+                    pending_text = ""
+                    last_output_at = None
+                    continue
                 last_output_at = asyncio.get_running_loop().time()
                 if session.replaces_output_snapshots:
                     pending_text = event.text
