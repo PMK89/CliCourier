@@ -522,6 +522,12 @@ class TelegramBridgeBot:
             if session.replaces_output_snapshots:
                 self._interactive_output_chats.add(chat_id)
                 self._screenshot_watch_since_by_chat[chat_id] = time.time()
+            target_bot = application.bot if application is not None else bot
+            if target_bot is not None:
+                self._create_background_task(
+                    application,
+                    self._send_agent_startup_snapshot(target_bot, chat_id, session),
+                )
         action = "resumed" if resume_last else "started"
         return f"Agent {action}: {' '.join(session.command)}"
 
@@ -1311,6 +1317,25 @@ class TelegramBridgeBot:
             await query.edit_message_text(str(exc))
             return
         await query.edit_message_text(f"Sent option: {choice.label}")
+
+    async def _send_agent_startup_snapshot(self, bot, chat_id: int, session: AgentSession) -> None:
+        if not session.replaces_output_snapshots:
+            return
+        # New sessions need time to render the startup screen; reattach is already ready.
+        is_new_session = getattr(getattr(session, "_process", None), "_created_session", False)
+        await asyncio.sleep(4.0 if is_new_session else 0.5)
+        if self.state.active_agent is not session or session._turn_in_progress:
+            return
+        visible = await session.capture_visible()
+        if not visible.strip():
+            return
+        text = prepare_agent_output(visible, suppress_trace_lines=self.settings.suppress_agent_trace_lines)
+        text = text.strip()
+        if not text:
+            return
+        session.advance_baseline()
+        if not self._chat_notifications_suppressed(chat_id):
+            await self._safe_send_message(bot, chat_id=chat_id, text=text)
 
     async def _flush_agent_output(self, bot, chat_id: int, session: AgentSession) -> None:
         pending_text = ""

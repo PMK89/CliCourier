@@ -243,6 +243,9 @@ class TmuxAgentProcess:
         )
         return result.stdout.rstrip()
 
+    async def capture_visible(self) -> str:
+        return await asyncio.to_thread(self._capture_visible_snapshot)
+
     def _capture_visible_snapshot(self) -> str:
         result = subprocess.run(
             ["tmux", "capture-pane", "-t", self.target, "-p", "-J"],

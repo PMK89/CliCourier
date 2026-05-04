@@ -123,6 +123,16 @@ class AgentSession:
     async def send_key(self, key: str) -> None:
         await self._process.send_key(key)
 
+    async def capture_visible(self) -> str:
+        """Return the currently visible pane content without scrollback history."""
+        capture = getattr(self._process, "capture_visible", None)
+        if capture is None:
+            return ""
+        try:
+            return await capture()
+        except Exception:
+            return ""
+
     def recent_output(self, max_chars: int | None = None) -> str:
         return self._buffer.recent(max_chars)
 
