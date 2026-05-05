@@ -1217,6 +1217,11 @@ class TelegramBridgeBot:
             return
         self._start_typing(context.bot, message.chat_id)
         await self._apply_approval_action(pending, decision)
+        if pending.message_id is not None:
+            try:
+                await context.bot.delete_message(chat_id=message.chat_id, message_id=pending.message_id)
+            except Exception:  # noqa: BLE001 - best-effort cleanup
+                pass
 
     async def _apply_approval_action(self, action: PendingAction, decision: ApprovalDecision) -> None:
         agent = self.state.active_agent

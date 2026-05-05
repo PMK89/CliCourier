@@ -563,6 +563,17 @@ def test_interpret_approval_words() -> None:
     assert interpret_approval_text("n") == "reject"
     assert interpret_approval_text("👎") == "reject"
     assert interpret_approval_text("yes, run tests") is None
+    # Extended approval words
+    for word in ("sure", "yep", "yup", "yeah", "alright", "go ahead", "go for it",
+                 "do it", "fine", "sounds good", "agreed", "confirm", "confirmed",
+                 "accept", "accepted", "grant", "granted"):
+        assert interpret_approval_text(word) == "approve", word
+        assert interpret_approval_text(word.upper()) == "approve", word
+    # Extended rejection words
+    for word in ("nope", "nah", "abort", "refuse", "refused", "decline", "declined",
+                 "no way", "skip", "never", "denied", "deny"):
+        assert interpret_approval_text(word) == "reject", word
+        assert interpret_approval_text(word.upper()) == "reject", word
 
 
 def test_ring_buffer_truncates_old_output() -> None:
