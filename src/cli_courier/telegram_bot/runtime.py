@@ -1321,21 +1321,28 @@ class TelegramBridgeBot:
     async def _send_agent_startup_snapshot(self, bot, chat_id: int, session: AgentSession) -> None:
         if not session.replaces_output_snapshots:
             return
-        # New sessions need time to render the startup screen; reattach is already ready.
         is_new_session = getattr(getattr(session, "_process", None), "_created_session", False)
-        await asyncio.sleep(4.0 if is_new_session else 0.5)
-        if self.state.active_agent is not session or session._turn_in_progress:
-            return
-        visible = await session.capture_visible()
-        if not visible.strip():
-            return
-        text = prepare_agent_output(visible, suppress_trace_lines=self.settings.suppress_agent_trace_lines)
-        text = text.strip()
-        if not text:
-            return
-        session.advance_baseline()
-        if not self._chat_notifications_suppressed(chat_id):
-            await self._safe_send_message(bot, chat_id=chat_id, text=text)
+        # For new sessions poll in stages: quick check at 2s (startup screen),
+        # then again at 5s and 10s to catch slow prompts like trust dialogs.
+        delays = [2.0, 3.0, 5.0] if is_new_session else [0.5]
+        last_sent_text = ""
+        for delay in delays:
+            await asyncio.sleep(delay)
+            if self.state.active_agent is not session or session._turn_in_progress:
+                break
+            visible = await session.capture_visible()
+            if not visible.strip():
+                continue
+            text = prepare_agent_output(visible, suppress_trace_lines=self.settings.suppress_agent_trace_lines)
+            text = text.strip()
+            if not text or text == last_sent_text:
+                continue
+            session.advance_baseline()
+            session._baseline_settled = True
+            if not self._chat_notifications_suppressed(chat_id):
+                await self._safe_send_message(bot, chat_id=chat_id, text=text)
+            last_sent_text = text
+        session._baseline_settled = True
 
     async def _flush_agent_output(self, bot, chat_id: int, session: AgentSession) -> None:
         pending_text = ""
@@ -1398,8 +1405,8 @@ class TelegramBridgeBot:
                 if event.kind != AgentEventKind.ASSISTANT_DELTA:
                     await self._maybe_update_dashboard(bot, chat_id, session)
                     continue
-                if not session._turn_in_progress:
-                    # Absorb TUI updates that arrive before the user sends a message.
+                if not session._turn_in_progress and session._baseline_settled:
+                    # Absorb TUI updates that arrive between turns once baseline is settled.
                     session.advance_baseline()
                     pending_text = ""
                     last_output_at = None
@@ -1430,7 +1437,7 @@ class TelegramBridgeBot:
                 if should_forward_progress:
                     await self._maybe_emit_fallback_approval(bot, chat_id, session)
             except asyncio.TimeoutError:
-                if not session._turn_in_progress and pending_text:
+                if not session._turn_in_progress and session._baseline_settled and pending_text:
                     # TUI noise between turns — absorb without sending.
                     session.advance_baseline()
                     pending_text = ""

@@ -499,6 +499,7 @@ class FakeFlushSession:
         self.is_running = True
         self.current_tool = None
         self._turn_in_progress = True
+        self._baseline_settled = True
 
     def recent_output(self, max_chars: int | None = None) -> str:
         return ""

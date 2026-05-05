@@ -82,6 +82,9 @@ class AgentSession:
         self.current_tool: str | None = None
         self.last_event: AgentEvent | None = None
         self._turn_in_progress = False
+        # False for tmux until _send_agent_startup_snapshot settles the baseline.
+        # True immediately for non-tmux backends (no snapshot-diff noise to guard against).
+        self._baseline_settled = not self.replaces_output_snapshots
 
     @property
     def is_running(self) -> bool:
@@ -145,6 +148,7 @@ class AgentSession:
         self._buffer.clear()
         self._visible_buffer.clear()
         self._turn_in_progress = True
+        self._baseline_settled = True
 
     def advance_baseline(self) -> None:
         """Advance the snapshot baseline to the current snapshot after a turn completes.
