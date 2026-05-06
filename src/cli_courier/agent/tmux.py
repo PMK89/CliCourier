@@ -107,6 +107,7 @@ class TmuxAgentProcess:
             initial = await asyncio.to_thread(self._capture_snapshot)
             self.initial_snapshot = initial
             self._last_snapshot = initial
+        await asyncio.to_thread(self._configure_session_options)
         self._reader_task = asyncio.create_task(self._read_loop())
 
     async def stop(self) -> None:
@@ -150,6 +151,24 @@ class TmuxAgentProcess:
                 self._shell_command(),
             ],
             check=True,
+        )
+
+    def _configure_session_options(self) -> None:
+        # Allow image-protocol escape sequences (Kitty APC, iTerm2 OSC 1337) to
+        # pass through tmux to the agent so that pasting images in the terminal works.
+        subprocess.run(
+            ["tmux", "set-option", "-w", "-t", self.target, "allow-passthrough", "on"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        # Allow OSC 52 clipboard sequences through, used by some terminals for
+        # clipboard-based image handoff.
+        subprocess.run(
+            ["tmux", "set-option", "-t", self.session_name, "set-clipboard", "on"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
         )
 
     def _kill_session(self) -> None:

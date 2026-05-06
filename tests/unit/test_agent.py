@@ -432,6 +432,8 @@ async def test_tmux_start_replaces_existing_dead_session(tmp_path, monkeypatch) 
             return type("Result", (), {"returncode": 0, "stdout": ""})()
         if command[:3] == ["tmux", "capture-pane", "-t"]:
             return type("Result", (), {"returncode": 0, "stdout": ""})()
+        if command[:2] == ["tmux", "set-option"]:
+            return type("Result", (), {"returncode": 0, "stdout": ""})()
         raise AssertionError(command)
 
     monkeypatch.setattr("cli_courier.agent.tmux.tmux_available", lambda: True)
@@ -481,6 +483,8 @@ async def test_tmux_start_replaces_existing_unmanaged_live_session(tmp_path, mon
             agent_state = "running\n"
             return type("Result", (), {"returncode": 0, "stdout": ""})()
         if command[:3] == ["tmux", "capture-pane", "-t"]:
+            return type("Result", (), {"returncode": 0, "stdout": ""})()
+        if command[:2] == ["tmux", "set-option"]:
             return type("Result", (), {"returncode": 0, "stdout": ""})()
         raise AssertionError(command)
 
